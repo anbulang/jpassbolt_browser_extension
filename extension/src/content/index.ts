@@ -73,6 +73,45 @@ function fill(username: string, password: string): boolean {
   return true;
 }
 
+/** Find the page's one-time-code (TOTP/2FA) input, if any. */
+function oneTimeCodeField(): HTMLInputElement | null {
+  const explicit = Array.from(
+    document.querySelectorAll<HTMLInputElement>('input[autocomplete="one-time-code"]'),
+  ).filter(isVisible);
+  if (explicit.length) return explicit[0];
+
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLInputElement>(
+      'input[type="text"], input[type="number"], input[type="tel"], input:not([type])',
+    ),
+  ).filter(isVisible);
+  const re = /otp|totp|2fa|mfa|one.?time|verif|auth.?code|security.?code|\btoken\b|\bcode\b/i;
+  const byHint = candidates.find((c) =>
+    re.test(`${c.autocomplete} ${c.name} ${c.id} ${c.getAttribute('aria-label') ?? ''} ${c.placeholder} ${c.getAttribute('inputmode') ?? ''}`),
+  );
+  if (byHint) return byHint;
+
+  // A short numeric field is the usual single-box OTP input.
+  return candidates.find((c) => c.maxLength > 0 && c.maxLength <= 8) ?? null;
+}
+
+function fillTotp(code: string): boolean {
+  // One-digit-per-box pattern (each <input maxlength="1">).
+  const boxes = Array.from(
+    document.querySelectorAll<HTMLInputElement>('input[maxlength="1"]'),
+  ).filter(isVisible);
+  if (boxes.length >= code.length) {
+    for (let i = 0; i < code.length; i++) setValue(boxes[i], code[i]);
+    boxes[code.length - 1].focus();
+    return true;
+  }
+  const field = oneTimeCodeField();
+  if (!field) return false;
+  setValue(field, code);
+  field.focus();
+  return true;
+}
+
 chrome.runtime.onMessage.addListener((msg: ContentReq, _sender, sendResponse) => {
   if (msg.type === 'HAS_LOGIN_FORM') {
     const res: ContentResult = { hasForm: passwordFields().length > 0, origin: location.origin };
@@ -81,6 +120,11 @@ chrome.runtime.onMessage.addListener((msg: ContentReq, _sender, sendResponse) =>
   }
   if (msg.type === 'DO_FILL') {
     const res: ContentResult = { filled: fill(msg.username, msg.password) };
+    sendResponse(res);
+    return;
+  }
+  if (msg.type === 'DO_FILL_TOTP') {
+    const res: ContentResult = { filled: fillTotp(msg.code) };
     sendResponse(res);
     return;
   }

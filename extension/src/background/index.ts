@@ -28,6 +28,8 @@ import type {
   StatusResult,
   VaultItem,
 } from '../shared/messages';
+import { generateTotp, isValidTotp } from '../shared/totp';
+import { pwnedCount } from '../shared/pwned';
 
 // ---------------------------------------------------------------------------
 // storage
@@ -59,6 +61,7 @@ let unlockedKey: openpgp.PrivateKey | null = null;
 let resourceCache: RawResource[] | null = null;
 const LOCK_ALARM = 'jpb-lock';
 const LOCK_MINUTES = 15;
+const CLIPBOARD_CLEAR_MS = 30_000;
 
 function armLock(): void {
   chrome.alarms.create(LOCK_ALARM, { delayInMinutes: LOCK_MINUTES });
@@ -210,12 +213,21 @@ async function streamToText(s: unknown): Promise<string> {
 function parseSecret(clear: string): SecretFields {
   try {
     const obj = JSON.parse(clear) as Record<string, unknown>;
-    if (obj && typeof obj === 'object' && 'password' in obj) {
-      const totp = obj.totp;
+    // Object schemas: password-and-description, password-description-totp, and
+    // standalone-totp (no password). Legacy 'string' schema falls through.
+    if (obj && typeof obj === 'object' && ('password' in obj || 'totp' in obj)) {
+      const totp = obj.totp as Record<string, unknown> | undefined;
       return {
-        password: String(obj.password ?? ''),
+        password: typeof obj.password === 'string' ? obj.password : '',
         description: typeof obj.description === 'string' ? obj.description : undefined,
-        totp: totp && typeof totp === 'object' ? JSON.stringify(totp) : undefined,
+        totp: totp && typeof totp === 'object'
+          ? {
+              secret_key: String(totp.secret_key ?? ''),
+              period: Number(totp.period ?? 30),
+              digits: Number(totp.digits ?? 6),
+              algorithm: String(totp.algorithm ?? 'SHA1'),
+            }
+          : undefined,
       };
     }
   } catch {
@@ -351,6 +363,41 @@ async function fillActiveTab(id: string): Promise<{ filled: boolean }> {
   return { filled: !!res && 'filled' in res && res.filled };
 }
 
+/** Decrypt the resource's TOTP, compute the current code, and fill it on the page. */
+async function fillTotpActiveTab(id: string): Promise<{ filled: boolean }> {
+  const { secret } = await revealSecret(id);
+  if (!isValidTotp(secret.totp)) throw new Error('This item has no TOTP configured.');
+  const { code } = await generateTotp(secret.totp);
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab?.id) throw new Error('No active tab.');
+  const msg: ContentReq = { type: 'DO_FILL_TOTP', code };
+  const res = (await chrome.tabs.sendMessage(tab.id, msg).catch(() => null)) as ContentResult | null;
+  return { filled: !!res && 'filled' in res && res.filled };
+}
+
+// ---------------------------------------------------------------------------
+// clipboard (via an offscreen document — the SW has no DOM of its own)
+// ---------------------------------------------------------------------------
+let creatingOffscreen: Promise<void> | null = null;
+
+async function ensureOffscreen(): Promise<void> {
+  if (await chrome.offscreen.hasDocument?.()) return;
+  if (!creatingOffscreen) {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: [chrome.offscreen.Reason.CLIPBOARD],
+      justification: 'Write and auto-clear the clipboard for password copy.',
+    }).catch(() => undefined) as Promise<void>;
+  }
+  try { await creatingOffscreen; } finally { creatingOffscreen = null; }
+}
+
+/** Copy `text`; when `clearAfterMs > 0` the offscreen doc wipes it afterwards. */
+async function copyToClipboard(text: string, clearAfterMs: number): Promise<void> {
+  await ensureOffscreen();
+  await chrome.runtime.sendMessage({ target: 'offscreen', type: 'clipboard-write', text, clearAfterMs });
+}
+
 // ---------------------------------------------------------------------------
 // message router
 // ---------------------------------------------------------------------------
@@ -378,6 +425,13 @@ async function handle(req: Req): Promise<unknown> {
       return { items: await findForUrl(req.url) };
     case 'FILL':
       return fillActiveTab(req.id);
+    case 'FILL_TOTP':
+      return fillTotpActiveTab(req.id);
+    case 'PWNED':
+      return { count: await pwnedCount(req.password) };
+    case 'COPY':
+      await copyToClipboard(req.text, req.temporary ? CLIPBOARD_CLEAR_MS : 0);
+      return { ok: true };
     default:
       throw new Error(`Unknown request: ${(req as { type: string }).type}`);
   }

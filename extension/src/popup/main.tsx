@@ -48,8 +48,8 @@ function Quickaccess() {
   const copy = async (id: string) => {
     try {
       const { secret } = await rpc({ type: 'REVEAL', id });
-      await navigator.clipboard.writeText(secret.password);
-      setFlash('Password copied to clipboard.');
+      await rpc({ type: 'COPY', text: secret.password, temporary: true });
+      setFlash('Password copied · clears in 30s.');
     } catch (e) { setFlash(e instanceof Error ? e.message : String(e)); }
     setTimeout(() => setFlash(null), 2500);
   };

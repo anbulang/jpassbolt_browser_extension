@@ -1,11 +1,11 @@
 import { StrictMode, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Copy, Eye, EyeOff, LogIn, RefreshCw, Search, Settings } from 'lucide-react';
+import { Copy, Eye, EyeOff, LogIn, RefreshCw, Search, Settings, ShieldAlert } from 'lucide-react';
 import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import {
-  Btn, ErrorMsg, Flow, Header, Spinner, initials, useStatus, useVault,
+  Btn, ErrorMsg, Flow, Header, Spinner, TotpView, initials, useStatus, useVault,
 } from '../ui/components';
 import { rpc, type SecretFields, type StatusResult, type VaultItem } from '../shared/messages';
 
@@ -15,6 +15,8 @@ function Detail({ item }: { item: VaultItem }) {
   const [err, setErr] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pwned, setPwned] = useState<number | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const reveal = async () => {
     setErr(null); setBusy(true);
@@ -26,8 +28,8 @@ function Detail({ item }: { item: VaultItem }) {
     try {
       const s = secret ?? (await rpc({ type: 'REVEAL', id: item.id })).secret;
       setSecret(s);
-      await navigator.clipboard.writeText(s.password);
-      setFlash('Copied'); setTimeout(() => setFlash(null), 1800);
+      await rpc({ type: 'COPY', text: s.password, temporary: true });
+      setFlash('Copied · clears in 30s'); setTimeout(() => setFlash(null), 1800);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   };
   const fill = async () => {
@@ -36,6 +38,24 @@ function Detail({ item }: { item: VaultItem }) {
       setFlash(r.filled ? 'Filled active tab' : 'No login form on the active tab');
       setTimeout(() => setFlash(null), 2200);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+  };
+  const copyTotp = async (code: string) => {
+    try { await rpc({ type: 'COPY', text: code, temporary: true }); setFlash('Code copied · clears in 30s'); setTimeout(() => setFlash(null), 1800); }
+    catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+  };
+  const fillTotpOnPage = async () => {
+    try {
+      const r = await rpc({ type: 'FILL_TOTP', id: item.id });
+      setFlash(r.filled ? 'Filled the code' : 'No code field on the active tab');
+      setTimeout(() => setFlash(null), 2200);
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+  };
+  const checkBreach = async () => {
+    if (!secret) return;
+    setChecking(true);
+    try { setPwned((await rpc({ type: 'PWNED', password: secret.password })).count); }
+    catch { setPwned(-1); }
+    finally { setChecking(false); }
   };
 
   return (
@@ -69,8 +89,15 @@ function Detail({ item }: { item: VaultItem }) {
         </div>
       ) : null}
 
+      {secret?.totp ? <TotpView cfg={secret.totp} onCopy={copyTotp} onFill={fillTotpOnPage} /> : null}
+
       <ErrorMsg text={err} />
       {flash ? <div className="jpb-ok">{flash}</div> : null}
+      {pwned !== null ? (
+        pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>Breach check unavailable.</div>
+          : pwned === 0 ? <div className="jpb-ok">Not found in known breaches.</div>
+            : <div className="jpb-error">Found in {pwned.toLocaleString()} known breaches — consider changing it.</div>
+      ) : null}
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {!secret ? (
@@ -80,6 +107,7 @@ function Detail({ item }: { item: VaultItem }) {
         )}
         <Btn onClick={copy}><Copy size={14} /> Copy password</Btn>
         <Btn onClick={fill}><LogIn size={14} /> Fill active tab</Btn>
+        {secret ? <Btn onClick={checkBreach} disabled={checking}><ShieldAlert size={14} /> {checking ? 'Checking…' : 'Breach check'}</Btn> : null}
       </div>
     </div>
   );

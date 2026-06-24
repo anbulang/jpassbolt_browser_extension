@@ -4,8 +4,15 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { KeyRound, Lock, Server, ShieldCheck, Loader2 } from 'lucide-react';
+import { Copy, Dices, KeyRound, Loader2, Lock, LogIn, RefreshCw, Server, ShieldCheck } from 'lucide-react';
 import { rpc, type StatusResult, type VaultItem } from '../shared/messages';
+import { generateTotp, isValidTotp, type TotpConfig } from '../shared/totp';
+import {
+  DEFAULT_PASSPHRASE_OPTIONS, DEFAULT_PASSWORD_OPTIONS,
+  generatePassphrase, generatePassword,
+  passphraseEntropyBits, passwordEntropyBits, passwordPoolSize,
+  type PassphraseOptions, type PasswordOptions,
+} from '../shared/passgen';
 
 // ---- primitives -----------------------------------------------------------
 export function Btn(props: {
@@ -206,6 +213,148 @@ export function useVault(active: boolean) {
 export function initials(name: string): string {
   const t = name.trim();
   return t ? t[0].toUpperCase() : '?';
+}
+
+// ---- TOTP live code -------------------------------------------------------
+/** Ticks the current TOTP code once a second; null when there is no valid config. */
+export function useTotp(cfg?: TotpConfig | null) {
+  const [state, setState] = useState<{ code: string; expiresInSec: number; period: number } | null>(null);
+  const key = isValidTotp(cfg) ? `${cfg.secret_key}|${cfg.period}|${cfg.digits}|${cfg.algorithm}` : '';
+  useEffect(() => {
+    if (!isValidTotp(cfg)) { setState(null); return; }
+    let alive = true;
+    const tick = async () => {
+      try { const r = await generateTotp(cfg); if (alive) setState(r); }
+      catch { if (alive) setState(null); }
+    };
+    void tick();
+    const h = setInterval(tick, 1000);
+    return () => { alive = false; clearInterval(h); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+  return state;
+}
+
+export function TotpView({ cfg, onCopy, onFill }: {
+  cfg: TotpConfig;
+  onCopy: (code: string) => void;
+  onFill?: () => void;
+}) {
+  const t = useTotp(cfg);
+  if (!t) return null;
+  const pretty = t.code.length === 6 ? `${t.code.slice(0, 3)} ${t.code.slice(3)}` : t.code;
+  return (
+    <div className="jpb-field" style={{ margin: 0 }}>
+      <span className="jpb-label">Verification code (TOTP)</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div className="jpb-secret-val" style={{ flex: 1, fontSize: 18, letterSpacing: '0.12em' }}>{pretty}</div>
+        <span className="jpb-totp-clock" title="Seconds until refresh">{t.expiresInSec}s</span>
+        <Btn small variant="ghost" title="Copy code" onClick={() => onCopy(t.code)}><Copy size={14} /></Btn>
+        {onFill ? <Btn small variant="ghost" title="Fill code on page" onClick={onFill}><LogIn size={14} /></Btn> : null}
+      </div>
+    </div>
+  );
+}
+
+// ---- strength labelling (shared by generator + create form) ---------------
+export function strengthFromEntropy(bits: number): { label: string; cls: string } {
+  if (bits < 60) return { label: 'Weak', cls: 'weak' };
+  if (bits < 80) return { label: 'Fair', cls: 'fair' };
+  if (bits < 120) return { label: 'Strong', cls: 'strong' };
+  return { label: 'Excellent', cls: 'excellent' };
+}
+
+// ---- password / passphrase generator --------------------------------------
+export function PasswordGenerator({ onUse }: { onUse?: (value: string) => void }) {
+  const [mode, setMode] = useState<'password' | 'passphrase'>('password');
+  const [pw, setPw] = useState<PasswordOptions>(DEFAULT_PASSWORD_OPTIONS);
+  const [pp, setPp] = useState<PassphraseOptions>(DEFAULT_PASSPHRASE_OPTIONS);
+  const [value, setValue] = useState('');
+  const [pwned, setPwned] = useState<number | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const regen = useCallback(() => {
+    setValue(mode === 'password' ? generatePassword(pw) : generatePassphrase(pp));
+    setPwned(null);
+  }, [mode, pw, pp]);
+  useEffect(() => { regen(); }, [regen]);
+
+  const entropy = mode === 'password'
+    ? passwordEntropyBits(pw.length, passwordPoolSize(pw))
+    : passphraseEntropyBits(pp.words);
+  const strength = strengthFromEntropy(entropy);
+
+  const copy = async () => { try { await rpc({ type: 'COPY', text: value, temporary: true }); } catch { /* ignore */ } };
+  const check = async () => {
+    setChecking(true);
+    try { setPwned((await rpc({ type: 'PWNED', password: value })).count); }
+    catch { setPwned(-1); }
+    finally { setChecking(false); }
+  };
+  const toggle = (k: keyof PasswordOptions) => setPw((o) => ({ ...o, [k]: !o[k] }));
+
+  return (
+    <div className="jpb-card">
+      <div className="jpb-h2"><Dices size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />Password generator</div>
+
+      <div style={{ display: 'flex', gap: 6, margin: '4px 0 12px' }}>
+        <Btn small variant={mode === 'password' ? 'primary' : 'default'} onClick={() => setMode('password')}>Password</Btn>
+        <Btn small variant={mode === 'passphrase' ? 'primary' : 'default'} onClick={() => setMode('passphrase')}>Passphrase</Btn>
+      </div>
+
+      <div className="jpb-secret-val" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, wordBreak: 'break-all' }}>
+        <span style={{ flex: 1 }}>{value}</span>
+        <Btn small variant="ghost" title="Regenerate" onClick={regen}><RefreshCw size={14} /></Btn>
+        <Btn small variant="ghost" title="Copy" onClick={copy}><Copy size={14} /></Btn>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '8px 0' }}>
+        <span className={`jpb-strength ${strength.cls}`}>{strength.label}</span>
+        <span className="jpb-muted" style={{ fontSize: 12 }}>~{entropy} bits</span>
+        <span style={{ flex: 1 }} />
+        <Btn small variant="ghost" onClick={check} disabled={checking || !value}>{checking ? 'Checking…' : 'Check breaches'}</Btn>
+      </div>
+      {pwned !== null ? (
+        pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>Breach check unavailable.</div>
+          : pwned === 0 ? <div className="jpb-ok">Not found in known breaches.</div>
+            : <div className="jpb-error">Found in {pwned.toLocaleString()} known breaches — choose another.</div>
+      ) : null}
+
+      {mode === 'password' ? (
+        <div style={{ marginTop: 10 }}>
+          <label className="jpb-label" style={{ display: 'block', marginBottom: 6 }}>Length: {pw.length}</label>
+          <input type="range" min={8} max={64} value={pw.length} onChange={(e) => setPw((o) => ({ ...o, length: Number(e.target.value) }))} style={{ width: '100%' }} />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 8, fontSize: 13 }}>
+            <label><input type="checkbox" checked={pw.upper} onChange={() => toggle('upper')} /> A-Z</label>
+            <label><input type="checkbox" checked={pw.lower} onChange={() => toggle('lower')} /> a-z</label>
+            <label><input type="checkbox" checked={pw.digits} onChange={() => toggle('digits')} /> 0-9</label>
+            <label><input type="checkbox" checked={pw.special} onChange={() => toggle('special')} /> !@#</label>
+            <label><input type="checkbox" checked={pw.excludeLookAlike} onChange={() => toggle('excludeLookAlike')} /> No look-alikes</label>
+          </div>
+        </div>
+      ) : (
+        <div style={{ marginTop: 10 }}>
+          <label className="jpb-label" style={{ display: 'block', marginBottom: 6 }}>Words: {pp.words}</label>
+          <input type="range" min={4} max={16} value={pp.words} onChange={(e) => setPp((o) => ({ ...o, words: Number(e.target.value) }))} style={{ width: '100%' }} />
+          <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', fontSize: 13 }}>
+            <span>Separator</span>
+            <input className="jpb-input" style={{ width: 60, height: 30 }} maxLength={3} value={pp.separator} onChange={(e) => setPp((o) => ({ ...o, separator: e.target.value }))} />
+            <select className="jpb-input" style={{ height: 30, width: 'auto' }} value={pp.wordCase} onChange={(e) => setPp((o) => ({ ...o, wordCase: e.target.value as PassphraseOptions['wordCase'] }))}>
+              <option value="lower">lower</option>
+              <option value="capitalize">Capitalize</option>
+              <option value="upper">UPPER</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      {onUse ? (
+        <div style={{ marginTop: 12 }}>
+          <Btn variant="primary" block onClick={() => onUse(value)}>Use this</Btn>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export { ShieldCheck };

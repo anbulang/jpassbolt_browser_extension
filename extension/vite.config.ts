@@ -12,7 +12,7 @@ export default defineConfig({
   build: {
     target: 'esnext',
     rollupOptions: {
-      input: { app: 'app.html' },
+      input: { app: 'app.html', offscreen: 'offscreen.html' },
     },
   },
   server: { port: 5180, strictPort: true },

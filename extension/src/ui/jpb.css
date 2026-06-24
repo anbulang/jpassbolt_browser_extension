@@ -127,3 +127,11 @@
 .jpb-link { color: var(--accent-text); cursor: pointer; background: none; border: none; font: inherit; font-size: 12px; padding: 0; }
 .jpb-link:hover { text-decoration: underline; }
 .jpb-center { display: grid; place-items: center; min-height: 200px; gap: 10px; text-align: center; }
+
+/* strength chip (password generator) + TOTP countdown */
+.jpb-strength { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; }
+.jpb-strength.weak { background: var(--red-soft); color: var(--red-text); }
+.jpb-strength.fair { background: var(--amber-soft); color: var(--amber-text); }
+.jpb-strength.strong { background: var(--green-soft); color: var(--green-text); }
+.jpb-strength.excellent { background: var(--accent-soft); color: var(--accent-text); }
+.jpb-totp-clock { font-family: var(--mono); font-size: 12px; color: var(--text-3); min-width: 34px; text-align: right; }

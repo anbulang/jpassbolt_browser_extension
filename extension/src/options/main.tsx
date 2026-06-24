@@ -5,7 +5,7 @@ import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import {
-  Btn, ErrorMsg, Header, KeyImportForm, ServerForm, Spinner, useStatus,
+  Btn, ErrorMsg, Header, KeyImportForm, PasswordGenerator, ServerForm, Spinner, useStatus,
 } from '../ui/components';
 import { rpc, type StatusResult } from '../shared/messages';
 
@@ -30,6 +30,8 @@ function Options() {
         <ServerForm initial={status.serverUrl} onDone={(s) => apply(s, 'Server saved.')} />
 
         <KeyImportForm onDone={(s) => apply(s, 'Key imported.')} />
+
+        <PasswordGenerator />
 
         <div className="jpb-card">
           <div className="jpb-h2"><ShieldCheck size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />Session</div>

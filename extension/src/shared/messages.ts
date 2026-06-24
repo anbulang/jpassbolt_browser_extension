@@ -3,6 +3,9 @@
 // the only context that ever holds private-key material; the UI exchanges these
 // plain-data messages and never sees the armored private key or passphrase.
 
+import type { TotpConfig } from './totp';
+export type { TotpConfig } from './totp';
+
 export type VaultPhase = 'no_server' | 'no_account' | 'locked' | 'unlocked';
 
 export interface AccountInfo {
@@ -25,7 +28,7 @@ export interface VaultItem {
 export interface SecretFields {
   password: string;
   description?: string;
-  totp?: string;
+  totp?: TotpConfig;
 }
 
 export interface StatusResult {
@@ -45,7 +48,10 @@ export type Req =
   | { type: 'LIST'; force?: boolean }
   | { type: 'REVEAL'; id: string }
   | { type: 'FIND_FOR_URL'; url: string }
-  | { type: 'FILL'; id: string };
+  | { type: 'FILL'; id: string }
+  | { type: 'FILL_TOTP'; id: string }
+  | { type: 'PWNED'; password: string }
+  | { type: 'COPY'; text: string; temporary?: boolean };
 
 export interface RespMap {
   GET_STATUS: StatusResult;
@@ -58,6 +64,9 @@ export interface RespMap {
   REVEAL: { item: VaultItem; secret: SecretFields };
   FIND_FOR_URL: { items: VaultItem[] };
   FILL: { filled: boolean };
+  FILL_TOTP: { filled: boolean };
+  PWNED: { count: number };
+  COPY: { ok: true };
 }
 
 /** Wire envelope returned by the background for every request. */
@@ -76,6 +85,7 @@ export async function rpc<K extends Req['type']>(
 // ---- Background -> content script (autofill) -----------------------------
 export type ContentReq =
   | { type: 'HAS_LOGIN_FORM' }
-  | { type: 'DO_FILL'; username: string; password: string };
+  | { type: 'DO_FILL'; username: string; password: string }
+  | { type: 'DO_FILL_TOTP'; code: string };
 
 export type ContentResult = { hasForm: boolean; origin: string } | { filled: boolean };
