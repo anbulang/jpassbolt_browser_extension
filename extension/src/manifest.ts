@@ -23,14 +23,17 @@ export default defineManifest({
     service_worker: 'src/background/index.ts',
     type: 'module',
   },
-  permissions: ['storage', 'scripting', 'activeTab', 'tabs', 'clipboardWrite', 'alarms', 'offscreen'],
+  permissions: ['storage', 'scripting', 'activeTab', 'tabs', 'clipboardWrite', 'alarms', 'offscreen', 'webNavigation'],
   host_permissions: ['<all_urls>'],
   content_scripts: [
     {
       matches: ['http://*/*', 'https://*/*'],
       js: ['src/content/index.ts'],
       run_at: 'document_idle',
-      all_frames: false,
+      // Inject into sub-frames too — login forms frequently live in an iframe.
+      // The script self-guards (idempotency + server-origin exclusion) so this
+      // stays cheap and never runs on the JPassbolt app's own pages.
+      all_frames: true,
     },
   ],
   web_accessible_resources: [

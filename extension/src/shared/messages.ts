@@ -31,6 +31,20 @@ export interface SecretFields {
   totp?: TotpConfig;
 }
 
+/**
+ * Input for creating a new password resource. The background encrypts (and
+ * signs) the secret with the user's OWN key before POSTing — the plaintext
+ * password/description never leave this object and are never persisted.
+ * Used by both the manual "New password" form and the post-login autosave.
+ */
+export interface CreateResourceInput {
+  name: string;
+  username: string;
+  uri: string;
+  password: string;
+  description: string;
+}
+
 export interface StatusResult {
   phase: VaultPhase;
   serverUrl: string;
@@ -48,10 +62,20 @@ export type Req =
   | { type: 'LIST'; force?: boolean }
   | { type: 'REVEAL'; id: string }
   | { type: 'FIND_FOR_URL'; url: string }
-  | { type: 'FILL'; id: string }
-  | { type: 'FILL_TOTP'; id: string }
+  // tabId lets the detached quickaccess window target the page tab explicitly;
+  // omitted, the background falls back to the active tab of the current window.
+  | { type: 'FILL'; id: string; tabId?: number }
+  | { type: 'FILL_TOTP'; id: string; tabId?: number }
   | { type: 'PWNED'; password: string }
-  | { type: 'COPY'; text: string; temporary?: boolean };
+  | { type: 'COPY'; text: string; temporary?: boolean }
+  | { type: 'CREATE_RESOURCE'; input: CreateResourceInput }
+  // ---- autosave (content script -> background; keyed by sender tab) --------
+  // STAGE_SAVE carries the plaintext captured at form submit; it lives ONLY in
+  // background memory (cleared on lock) until the user confirms or dismisses.
+  | { type: 'STAGE_SAVE'; name: string; username: string; uri: string; password: string }
+  | { type: 'GET_PENDING_SAVE' }
+  | { type: 'COMMIT_SAVE' }
+  | { type: 'DISCARD_SAVE' };
 
 export interface RespMap {
   GET_STATUS: StatusResult;
@@ -67,6 +91,12 @@ export interface RespMap {
   FILL_TOTP: { filled: boolean };
   PWNED: { count: number };
   COPY: { ok: true };
+  CREATE_RESOURCE: { item: VaultItem };
+  STAGE_SAVE: { ok: true };
+  // The pending-save preview NEVER includes the password (display-only).
+  GET_PENDING_SAVE: { pending: { name: string; username: string; uri: string } | null };
+  COMMIT_SAVE: { item: VaultItem };
+  DISCARD_SAVE: { ok: true };
 }
 
 /** Wire envelope returned by the background for every request. */

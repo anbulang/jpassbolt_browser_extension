@@ -1,16 +1,45 @@
 import { StrictMode, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Copy, KeyRound, LogIn, Settings, Search } from 'lucide-react';
+import { Copy, ExternalLink, KeyRound, LogIn, Plus, Settings, Search } from 'lucide-react';
 import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import {
-  Btn, Flow, Header, Spinner, initials, useStatus, useVault,
+  Btn, CreateResourceForm, Flow, Header, Spinner, initials, useStatus, useVault,
 } from '../ui/components';
-import { rpc, type StatusResult, type VaultItem } from '../shared/messages';
+import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
+
+// Detached mode: this popup was re-opened as a standalone window (chrome.windows
+// .create). In that case `currentWindow` is the popup itself, so the originating
+// page tab id is carried in the URL and used to target autofill / suggestions.
+const PARAMS = new URLSearchParams(location.search);
+const DETACHED = PARAMS.get('detached') === '1';
+const DETACHED_TAB_ID = PARAMS.get('tabId') ? Number(PARAMS.get('tabId')) : null;
 
 function openVault() {
   chrome.tabs.create({ url: chrome.runtime.getURL('app.html') });
+}
+
+/** The content page tab this quickaccess acts on (the detached tab, else active). */
+async function pageTab(): Promise<chrome.tabs.Tab | null> {
+  if (DETACHED && DETACHED_TAB_ID != null) {
+    try { return await chrome.tabs.get(DETACHED_TAB_ID); } catch { return null; }
+  }
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab ?? null;
+}
+
+/** Pop the quickaccess out into its own resizable window, carrying the page tab. */
+async function detach() {
+  const tab = await pageTab();
+  const qs = tab?.id ? `?detached=1&tabId=${tab.id}` : '?detached=1';
+  await chrome.windows.create({
+    url: chrome.runtime.getURL('popup.html' + qs),
+    type: 'popup',
+    width: 380,
+    height: 600,
+  });
+  window.close();
 }
 
 function Quickaccess() {
@@ -18,11 +47,18 @@ function Quickaccess() {
   const [matches, setMatches] = useState<VaultItem[] | null>(null);
   const [q, setQ] = useState('');
   const [flash, setFlash] = useState<string | null>(null);
+  // Non-null -> show the create form, prefilled from the current page (⑩).
+  const [creating, setCreating] = useState<Partial<CreateResourceInput> | null>(null);
+
+  const startCreate = async () => {
+    const tab = await pageTab();
+    setCreating({ name: tab?.title ?? '', uri: tab?.url ?? '' });
+  };
 
   // Current-tab suggestions (autofill candidates for the active site).
   useEffect(() => {
     (async () => {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const tab = await pageTab();
       if (tab?.url) setMatches((await rpc({ type: 'FIND_FOR_URL', url: tab.url })).items);
       else setMatches([]);
     })();
@@ -39,11 +75,19 @@ function Quickaccess() {
 
   const fill = async (id: string) => {
     try {
-      const r = await rpc({ type: 'FILL', id });
+      const tab = await pageTab();
+      // In a detached window the source tab can be gone; never fall back to
+      // whatever tab happens to be active (that could fill the wrong site).
+      if (DETACHED && !tab) {
+        setFlash('The original page is no longer open.');
+        setTimeout(() => setFlash(null), 2500);
+        return;
+      }
+      const r = await rpc({ type: 'FILL', id, tabId: tab?.id });
       setFlash(r.filled ? 'Filled the login form.' : 'No login form found on this page.');
     } catch (e) { setFlash(e instanceof Error ? e.message : String(e)); }
     setTimeout(() => setFlash(null), 2500);
-    window.close();
+    if (!DETACHED) window.close(); // keep the detached window open for further actions
   };
   const copy = async (id: string) => {
     try {
@@ -67,6 +111,17 @@ function Quickaccess() {
       </div>
     </div>
   );
+
+  if (creating) {
+    return (
+      <CreateResourceForm
+        initial={creating}
+        compact
+        onCreated={() => { setCreating(null); reload(true); }}
+        onCancel={() => setCreating(null)}
+      />
+    );
+  }
 
   return (
     <>
@@ -92,6 +147,7 @@ function Quickaccess() {
       </div>
 
       <div style={{ display: 'flex', gap: 8 }}>
+        <Btn block variant="primary" onClick={startCreate}><Plus size={14} /> New</Btn>
         <Btn block onClick={openVault}><KeyRound size={14} /> Open vault</Btn>
         <Btn block variant="ghost" onClick={() => reload(true)}>Refresh</Btn>
       </div>
@@ -109,9 +165,16 @@ function Popup() {
         account={status?.account ?? null}
         onLock={status?.phase === 'unlocked' ? lock : undefined}
         right={
-          <Btn small variant="ghost" title="Settings" onClick={() => chrome.runtime.openOptionsPage()}>
-            <Settings size={14} />
-          </Btn>
+          <>
+            {!DETACHED ? (
+              <Btn small variant="ghost" title="Open in a separate window" onClick={detach}>
+                <ExternalLink size={14} />
+              </Btn>
+            ) : null}
+            <Btn small variant="ghost" title="Settings" onClick={() => chrome.runtime.openOptionsPage()}>
+              <Settings size={14} />
+            </Btn>
+          </>
         }
       />
       <div className="jpb-body">

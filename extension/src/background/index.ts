@@ -22,6 +22,7 @@ import type {
   AccountInfo,
   ContentReq,
   ContentResult,
+  CreateResourceInput,
   Req,
   RpcResult,
   SecretFields,
@@ -59,9 +60,19 @@ async function del(keys: string[]): Promise<void> {
 // ---------------------------------------------------------------------------
 let unlockedKey: openpgp.PrivateKey | null = null;
 let resourceCache: RawResource[] | null = null;
+let resourceTypeCache: RawResourceType[] | null = null;
 const LOCK_ALARM = 'jpb-lock';
 const LOCK_MINUTES = 15;
 const CLIPBOARD_CLEAR_MS = 30_000;
+
+/**
+ * Post-submit credentials captured by the content script, awaiting an autosave
+ * decision. Keyed by tab id; holds PLAINTEXT only in worker memory and only
+ * until the user saves/dismisses or it expires. Cleared on lock/logout.
+ */
+interface PendingSave { name: string; username: string; uri: string; password: string; ts: number }
+const pendingSaves = new Map<number, PendingSave>();
+const PENDING_SAVE_TTL_MS = 3 * 60_000;
 
 function armLock(): void {
   chrome.alarms.create(LOCK_ALARM, { delayInMinutes: LOCK_MINUTES });
@@ -69,6 +80,8 @@ function armLock(): void {
 function lock(): void {
   unlockedKey = null;
   resourceCache = null;
+  resourceTypeCache = null; // drop the type catalogue too (account/server may change)
+  pendingSaves.clear(); // never retain captured plaintext past a lock
   chrome.alarms.clear(LOCK_ALARM);
 }
 chrome.alarms.onAlarm.addListener((a) => {
@@ -171,6 +184,18 @@ interface RawResource {
   resource_type_id?: string;
   metadata?: string | null;
 }
+interface RawResourceType { id: string; slug: string; deleted?: string | null }
+
+/**
+ * Canonical Passbolt v4 resource-type seed UUIDs. The server ships these exact
+ * ids; we prefer the live /resource-types.json list but fall back to these so a
+ * create still works if that fetch is unavailable. Mirrors the SPA's
+ * RESOURCE_TYPE_ID (secretFormat.ts) so resources made here are interoperable.
+ */
+const RESOURCE_TYPE_ID = {
+  PASSWORD_STRING: '669f8c64-242a-59fb-92fc-81f660975fd3',
+  PASSWORD_AND_DESCRIPTION: 'a28a04cd-6f53-518a-967c-9963bf9cec51',
+} as const;
 
 function toItem(r: RawResource): VaultItem {
   return {
@@ -188,6 +213,26 @@ async function listResources(force = false): Promise<VaultItem[]> {
   }
   armLock();
   return (resourceCache ?? []).map(toItem);
+}
+
+/** Live resource-type catalogue (cached); used to resolve a create's type id. */
+async function listResourceTypes(): Promise<RawResourceType[]> {
+  if (!resourceTypeCache) {
+    resourceTypeCache = await apiCall<RawResourceType[]>('GET', '/resource-types.json').catch(() => []);
+  }
+  return resourceTypeCache ?? [];
+}
+
+/**
+ * Resolve the resource_type_id to create under. We always create a
+ * "password and description" v4 resource (description encrypted inside the
+ * secret) — the most capable v4 shape and the SPA's default. Prefer the live
+ * catalogue's id for that slug; fall back to the seed UUID.
+ */
+async function passwordAndDescriptionTypeId(): Promise<string> {
+  const types = await listResourceTypes();
+  const match = types.find((t) => t.slug === 'password-and-description' && !t.deleted);
+  return match?.id ?? RESOURCE_TYPE_ID.PASSWORD_AND_DESCRIPTION;
 }
 
 /** Decrypt the current user's secret for a resource into named fields. */
@@ -255,6 +300,108 @@ async function findForUrl(url: string): Promise<VaultItem[]> {
 }
 
 // ---------------------------------------------------------------------------
+// resource creation (write path) — encrypt+sign for self, POST /resources.json
+// ---------------------------------------------------------------------------
+async function ownPublicKeyArmored(): Promise<string> {
+  const pub = await get<string>(K.publicKey);
+  if (!pub) throw new Error('Your public key is unavailable. Re-import your key in Settings.');
+  return pub;
+}
+
+/**
+ * Encrypt a secret plaintext to the current user's OWN public key, signing with
+ * the in-memory private key. Produces exactly one Secret row for the creator —
+ * zero-knowledge is preserved (the server only ever sees ciphertext).
+ */
+async function encryptForSelf(plaintext: string): Promise<string> {
+  if (!unlockedKey) throw new Error('Vault is locked.');
+  const pub = await openpgp.readKey({ armoredKey: await ownPublicKeyArmored() });
+  const message = await openpgp.createMessage({ text: plaintext });
+  const armored = await openpgp.encrypt({
+    message,
+    encryptionKeys: pub,
+    signingKeys: unlockedKey, // sign so the secret looks native to official clients
+  });
+  return armored as string;
+}
+
+/**
+ * Create a new v4 "password and description" resource. Encrypts+signs the secret
+ * for the creator only, POSTs to /resources.json (the creator is granted OWNER
+ * server-side), then invalidates the cache so the item appears everywhere.
+ */
+async function createResource(input: CreateResourceInput): Promise<{ item: VaultItem }> {
+  if (!unlockedKey) throw new Error('Vault is locked.');
+  const name = input.name.trim();
+  if (!name) throw new Error('A name is required.');
+  if (!input.password) throw new Error('A password is required.');
+
+  const resourceTypeId = await passwordAndDescriptionTypeId();
+  // password-and-description: the description is encrypted INSIDE the secret JSON;
+  // the cleartext `description` column is therefore sent empty.
+  const plaintext = JSON.stringify({
+    password: input.password,
+    description: input.description ?? '',
+  });
+  const data = await encryptForSelf(plaintext);
+
+  const dto = {
+    name,
+    username: input.username.trim(),
+    uri: input.uri.trim(),
+    description: '',
+    resource_type_id: resourceTypeId,
+    secrets: [{ data }],
+  };
+  const created = await apiCall<RawResource>('POST', '/resources.json', dto);
+  resourceCache = null; // force a fresh list on next read
+  armLock();
+  return { item: toItem(created) };
+}
+
+// ---------------------------------------------------------------------------
+// autosave — stage submitted credentials, then create on user confirmation
+// ---------------------------------------------------------------------------
+function stageSave(tabId: number, p: Omit<PendingSave, 'ts'>): { ok: true } {
+  // Only stage while unlocked AND when there is a password worth saving.
+  if (unlockedKey && p.password) {
+    pendingSaves.set(tabId, { ...p, ts: Date.now() });
+  }
+  return { ok: true };
+}
+
+/** Read (and prune if expired) the pending save for a tab — WITHOUT the password. */
+async function getPendingSave(tabId: number): Promise<{ pending: { name: string; username: string; uri: string } | null }> {
+  const p = pendingSaves.get(tabId);
+  if (!p) return { pending: null };
+  if (Date.now() - p.ts > PENDING_SAVE_TTL_MS) { pendingSaves.delete(tabId); return { pending: null }; }
+  // Suppress the prompt if this exact login is already saved. Ensure the list is
+  // loaded first (the cache may be cold on a fresh page) and compare host +
+  // username case-insensitively (createResource trims; captured creds may not).
+  let list: RawResource[] = resourceCache ?? [];
+  try { await listResources(); list = resourceCache ?? list; } catch { /* offline — best-effort */ }
+  const host = hostOf(p.uri);
+  const user = p.username.trim().toLowerCase();
+  const dup = list.some(
+    (r) => hostOf(r.uri ?? '') === host && (r.username ?? '').trim().toLowerCase() === user,
+  );
+  if (dup) { pendingSaves.delete(tabId); return { pending: null }; }
+  return { pending: { name: p.name, username: p.username, uri: p.uri } };
+}
+
+async function commitSave(tabId: number): Promise<{ item: VaultItem }> {
+  const p = pendingSaves.get(tabId);
+  if (!p) throw new Error('Nothing to save.');
+  pendingSaves.delete(tabId);
+  return createResource({ name: p.name, username: p.username, uri: p.uri, password: p.password, description: '' });
+}
+
+function discardSave(tabId: number): { ok: true } {
+  pendingSaves.delete(tabId);
+  return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // account lifecycle
 // ---------------------------------------------------------------------------
 interface RawUser {
@@ -305,6 +452,12 @@ async function importKey(armoredPrivateKey: string): Promise<StatusResult> {
  * GpgAuth if needed). Used for both first login and re-unlock after idle/lock.
  */
 async function unlock(passphrase: string): Promise<StatusResult> {
+  // Drop any in-memory caches from a previous session/account so a re-import +
+  // unlock never serves the prior account's resource list or type catalogue.
+  resourceCache = null;
+  resourceTypeCache = null;
+  pendingSaves.clear();
+
   const armored = await get<string>(K.privateKey);
   const serverUrl = await get<string>(K.serverUrl);
   if (!serverUrl) throw new Error('No server configured.');
@@ -354,25 +507,66 @@ async function logout(): Promise<StatusResult> {
 // ---------------------------------------------------------------------------
 // autofill: decrypt then ask the active tab's content script to fill
 // ---------------------------------------------------------------------------
-async function fillActiveTab(id: string): Promise<{ filled: boolean }> {
-  const { item, secret } = await revealSecret(id);
+/**
+ * Resolve which tab to fill. The popup normally targets the active tab of the
+ * current window; the DETACHED quickaccess window is itself the current window,
+ * so it passes the originating page's tabId explicitly.
+ */
+async function targetTabId(explicit?: number): Promise<number> {
+  if (explicit != null) return explicit;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) throw new Error('No active tab.');
+  return tab.id;
+}
+
+/**
+ * Deliver a fill message to every frame of a tab (top frame first) and return
+ * true on the first frame that reports a successful fill. With all_frames
+ * injection a login form may live in a sub-frame, so a single tab-wide send
+ * (which resolves with a nondeterministic first responder) is not enough.
+ */
+async function fillAcrossFrames(tabId: number, msg: ContentReq, wantedHost?: string): Promise<boolean> {
+  let frameIds: number[] = [0];
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    if (frames && frames.length) {
+      let pick = frames;
+      if (wantedHost) {
+        // Only deliver the cleartext to frames whose origin matches the
+        // resource host — never into an unrelated cross-origin sub-frame
+        // (e.g. an embedded ad/widget iframe). Else fall back to the top frame.
+        const matched = frames.filter((f) => {
+          const h = hostOf(f.url ?? '');
+          return h && (h === wantedHost || h.endsWith('.' + wantedHost) || wantedHost.endsWith('.' + h));
+        });
+        pick = matched.length ? matched : frames.filter((f) => f.frameId === 0);
+      }
+      frameIds = pick.map((f) => f.frameId).sort((a, b) => a - b);
+    }
+  } catch { /* webNavigation unavailable — fall back to the top frame */ }
+  if (frameIds.length === 0) frameIds = [0];
+  for (const frameId of frameIds) {
+    const res = (await chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => null)) as ContentResult | null;
+    if (res && 'filled' in res && res.filled) return true;
+  }
+  return false;
+}
+
+async function fillActiveTab(id: string, tabId?: number): Promise<{ filled: boolean }> {
+  const { item, secret } = await revealSecret(id);
+  const target = await targetTabId(tabId);
   const msg: ContentReq = { type: 'DO_FILL', username: item.username, password: secret.password };
-  const res = (await chrome.tabs.sendMessage(tab.id, msg).catch(() => null)) as ContentResult | null;
-  return { filled: !!res && 'filled' in res && res.filled };
+  return { filled: await fillAcrossFrames(target, msg, hostOf(item.uri) || undefined) };
 }
 
 /** Decrypt the resource's TOTP, compute the current code, and fill it on the page. */
-async function fillTotpActiveTab(id: string): Promise<{ filled: boolean }> {
-  const { secret } = await revealSecret(id);
+async function fillTotpActiveTab(id: string, tabId?: number): Promise<{ filled: boolean }> {
+  const { item, secret } = await revealSecret(id);
   if (!isValidTotp(secret.totp)) throw new Error('This item has no TOTP configured.');
   const { code } = await generateTotp(secret.totp);
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error('No active tab.');
+  const target = await targetTabId(tabId);
   const msg: ContentReq = { type: 'DO_FILL_TOTP', code };
-  const res = (await chrome.tabs.sendMessage(tab.id, msg).catch(() => null)) as ContentResult | null;
-  return { filled: !!res && 'filled' in res && res.filled };
+  return { filled: await fillAcrossFrames(target, msg, hostOf(item.uri) || undefined) };
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +595,13 @@ async function copyToClipboard(text: string, clearAfterMs: number): Promise<void
 // ---------------------------------------------------------------------------
 // message router
 // ---------------------------------------------------------------------------
-async function handle(req: Req): Promise<unknown> {
+function senderTabId(sender: chrome.runtime.MessageSender): number {
+  const id = sender.tab?.id;
+  if (id == null) throw new Error('This action requires a tab context.');
+  return id;
+}
+
+async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {
   switch (req.type) {
     case 'GET_STATUS':
       return currentStatus();
@@ -424,21 +624,31 @@ async function handle(req: Req): Promise<unknown> {
     case 'FIND_FOR_URL':
       return { items: await findForUrl(req.url) };
     case 'FILL':
-      return fillActiveTab(req.id);
+      return fillActiveTab(req.id, req.tabId);
     case 'FILL_TOTP':
-      return fillTotpActiveTab(req.id);
+      return fillTotpActiveTab(req.id, req.tabId);
     case 'PWNED':
       return { count: await pwnedCount(req.password) };
     case 'COPY':
       await copyToClipboard(req.text, req.temporary ? CLIPBOARD_CLEAR_MS : 0);
       return { ok: true };
+    case 'CREATE_RESOURCE':
+      return createResource(req.input);
+    case 'STAGE_SAVE':
+      return stageSave(senderTabId(sender), { name: req.name, username: req.username, uri: req.uri, password: req.password });
+    case 'GET_PENDING_SAVE':
+      return getPendingSave(senderTabId(sender));
+    case 'COMMIT_SAVE':
+      return commitSave(senderTabId(sender));
+    case 'DISCARD_SAVE':
+      return discardSave(senderTabId(sender));
     default:
       throw new Error(`Unknown request: ${(req as { type: string }).type}`);
   }
 }
 
-chrome.runtime.onMessage.addListener((req: Req, _sender, sendResponse) => {
-  handle(req)
+chrome.runtime.onMessage.addListener((req: Req, sender, sendResponse) => {
+  handle(req, sender)
     .then((data) => sendResponse({ ok: true, data } as RpcResult<unknown>))
     .catch((e: unknown) =>
       sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) } as RpcResult<unknown>),

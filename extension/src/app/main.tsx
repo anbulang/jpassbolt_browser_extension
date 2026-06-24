@@ -1,13 +1,25 @@
 import { StrictMode, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Copy, Eye, EyeOff, LogIn, RefreshCw, Search, Settings, ShieldAlert } from 'lucide-react';
+import { Copy, Eye, EyeOff, LogIn, Plus, RefreshCw, Search, Settings, ShieldAlert } from 'lucide-react';
 import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import {
-  Btn, ErrorMsg, Flow, Header, Spinner, TotpView, initials, useStatus, useVault,
+  Btn, CreateResourceForm, ErrorMsg, Flow, Header, Spinner, TotpView, initials, useStatus, useVault,
 } from '../ui/components';
 import { rpc, type SecretFields, type StatusResult, type VaultItem } from '../shared/messages';
+
+/**
+ * The web page the full-page app should act on. The app lives in its own
+ * chrome-extension:// tab (where no content script runs), so "fill" must target
+ * the most recently used http(s) tab, not the active tab (which is the app).
+ */
+async function lastWebTab(): Promise<chrome.tabs.Tab | null> {
+  const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+  if (!tabs.length) return null;
+  return tabs.reduce((a, b) =>
+    (((b as { lastAccessed?: number }).lastAccessed ?? 0) > ((a as { lastAccessed?: number }).lastAccessed ?? 0) ? b : a));
+}
 
 function Detail({ item }: { item: VaultItem }) {
   const [secret, setSecret] = useState<SecretFields | null>(null);
@@ -34,8 +46,10 @@ function Detail({ item }: { item: VaultItem }) {
   };
   const fill = async () => {
     try {
-      const r = await rpc({ type: 'FILL', id: item.id });
-      setFlash(r.filled ? 'Filled active tab' : 'No login form on the active tab');
+      const tab = await lastWebTab();
+      if (!tab?.id) { setErr('No open web page to fill — open the site first.'); return; }
+      const r = await rpc({ type: 'FILL', id: item.id, tabId: tab.id });
+      setFlash(r.filled ? 'Filled the page' : 'No login form on that page');
       setTimeout(() => setFlash(null), 2200);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   };
@@ -45,8 +59,10 @@ function Detail({ item }: { item: VaultItem }) {
   };
   const fillTotpOnPage = async () => {
     try {
-      const r = await rpc({ type: 'FILL_TOTP', id: item.id });
-      setFlash(r.filled ? 'Filled the code' : 'No code field on the active tab');
+      const tab = await lastWebTab();
+      if (!tab?.id) { setErr('No open web page to fill — open the site first.'); return; }
+      const r = await rpc({ type: 'FILL_TOTP', id: item.id, tabId: tab.id });
+      setFlash(r.filled ? 'Filled the code' : 'No code field on that page');
       setTimeout(() => setFlash(null), 2200);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   };
@@ -76,7 +92,7 @@ function Detail({ item }: { item: VaultItem }) {
       <div className="jpb-field" style={{ margin: 0 }}>
         <span className="jpb-label">Password</span>
         {secret ? (
-          <div className="jpb-secret-val">{show ? secret.password : '•'.repeat(Math.min(secret.password.length || 8, 24))}</div>
+          <div className="jpb-secret-val">{show ? secret.password : '••••••••••'}</div>
         ) : (
           <div className="jpb-secret-val" style={{ color: 'var(--text-muted)' }}>•••••••• (locked)</div>
         )}
@@ -117,6 +133,7 @@ function Vault() {
   const { items, err, reload } = useVault(true);
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState<VaultItem | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const filtered = useMemo(() => {
     const all = items ?? [];
@@ -132,6 +149,7 @@ function Vault() {
             <Search size={15} style={{ position: 'absolute', left: 10, top: 10, color: 'var(--text-muted)' }} />
             <input className="jpb-search" style={{ paddingLeft: 32 }} placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
+          <Btn variant="primary" title="New password" onClick={() => { setCreating(true); setSelected(null); }}><Plus size={14} /> New</Btn>
           <Btn variant="ghost" title="Refresh" onClick={() => reload(true)}><RefreshCw size={14} /></Btn>
         </div>
         <ErrorMsg text={err} />
@@ -139,7 +157,7 @@ function Vault() {
           filtered.length === 0 ? <div className="jpb-empty">No passwords yet.</div> :
             <div className="jpb-list" style={{ maxHeight: '70vh' }}>
               {filtered.map((i) => (
-                <div key={i.id} className="jpb-row" onClick={() => setSelected(i)} style={selected?.id === i.id ? { background: 'var(--surface-2)', borderColor: 'var(--border)' } : undefined}>
+                <div key={i.id} className="jpb-row" onClick={() => { setSelected(i); setCreating(false); }} style={selected?.id === i.id ? { background: 'var(--surface-2)', borderColor: 'var(--border)' } : undefined}>
                   <div className="jpb-row-icon">{initials(i.name)}</div>
                   <div className="jpb-row-main">
                     <div className="jpb-row-name">{i.name}</div>
@@ -150,7 +168,16 @@ function Vault() {
             </div>}
       </div>
       <div>
-        {selected ? <Detail key={selected.id} item={selected} /> : <div className="jpb-card jpb-empty">Select a password to view its details.</div>}
+        {creating ? (
+          <CreateResourceForm
+            onCreated={(item) => { setCreating(false); reload(true); setSelected(item); }}
+            onCancel={() => setCreating(false)}
+          />
+        ) : selected ? (
+          <Detail key={selected.id} item={selected} />
+        ) : (
+          <div className="jpb-card jpb-empty">Select a password to view its details, or create a new one.</div>
+        )}
       </div>
     </div>
   );

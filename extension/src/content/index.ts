@@ -1,131 +1,184 @@
 /**
- * Autofill content script (Phase 2). Runs in the page's isolated world. It holds
- * NO secrets and does NO crypto — it only (a) reports whether the page has a
- * login form and (b) fills username/password fields when the background, after
- * decrypting in its own context, sends DO_FILL.
+ * Autofill content script orchestrator. Runs in the page's isolated world in
+ * EVERY frame (all_frames). It holds NO secrets and does NO crypto — it:
+ *   - reports / performs fills when the background sends DO_FILL(_TOTP);
+ *   - shows the in-form CTA + menu when a login field is focused (⑧⑨);
+ *   - captures submitted credentials and offers an autosave banner (⑩);
+ *   - re-detects forms across SPA navigation (⑦).
+ *
+ * Hardening (⑦): a window-level idempotency guard (all_frames + any future
+ * re-injection can run this twice), a runtime exclusion of the configured
+ * JPassbolt server origin (never act on our own app), and history/MutationObserver
+ * hooks because tabs.onUpdated never fires on SPA route changes.
  */
-import type { ContentReq, ContentResult } from '../shared/messages';
+import { rpc, type ContentReq, type ContentResult } from '../shared/messages';
+import { fill, fillTotp, passwordFields, ctaAnchor, captureCredentials } from './dom';
+import { InForm } from './inform';
 
-// Announce presence to JPassbolt web pages (the SPA reads this to decide whether
-// to show an "install the extension" prompt). Harmless on third-party sites.
-try {
-  document.documentElement.setAttribute(
-    'data-jpassbolt-extension',
-    chrome.runtime.getManifest().version,
-  );
-} catch {
-  /* not a normal DOM document — ignore */
+// --- idempotency: never initialize twice in one frame ----------------------
+declare global { interface Window { __jpbContent?: true } }
+if (window.__jpbContent) {
+  // already initialized — do nothing
+} else {
+  window.__jpbContent = true;
+  init();
 }
 
-function isVisible(el: HTMLElement): boolean {
-  const r = el.getBoundingClientRect();
-  const s = getComputedStyle(el);
-  return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
-}
+function init(): void {
+  const TOP = window.top === window;
 
-function passwordFields(): HTMLInputElement[] {
-  return Array.from(document.querySelectorAll<HTMLInputElement>('input[type="password"]')).filter(isVisible);
-}
+  // Announce presence to JPassbolt web pages (the SPA reads this to decide
+  // whether to show an "install the extension" prompt). Harmless elsewhere.
+  try {
+    document.documentElement.setAttribute('data-jpassbolt-extension', chrome.runtime.getManifest().version);
+  } catch { /* not a normal DOM document */ }
 
-/** Pick the username field associated with a password field. */
-function usernameFieldFor(pw: HTMLInputElement): HTMLInputElement | null {
-  const candidates = Array.from(
-    document.querySelectorAll<HTMLInputElement>(
-      'input[type="text"], input[type="email"], input[type="tel"], input:not([type])',
-    ),
-  ).filter(isVisible);
-  if (candidates.length === 0) return null;
-
-  // Prefer an explicit username/email signal.
-  const byHint = candidates.find((c) => {
-    const hay = `${c.autocomplete} ${c.name} ${c.id} ${c.getAttribute('aria-label') ?? ''} ${c.placeholder}`.toLowerCase();
-    return /user|email|login|account|e-?mail/.test(hay);
+  // --- background-driven autofill (existing protocol) ----------------------
+  chrome.runtime.onMessage.addListener((msg: ContentReq, _sender, sendResponse) => {
+    if (msg.type === 'HAS_LOGIN_FORM') {
+      sendResponse({ hasForm: passwordFields().length > 0, origin: location.origin } as ContentResult);
+      return;
+    }
+    if (msg.type === 'DO_FILL') {
+      sendResponse({ filled: fill(msg.username, msg.password) } as ContentResult);
+      return;
+    }
+    if (msg.type === 'DO_FILL_TOTP') {
+      sendResponse({ filled: fillTotp(msg.code) } as ContentResult);
+      return;
+    }
   });
-  if (byHint) return byHint;
 
-  // Else the last visible text-like input that appears before the password in DOM order.
-  const before = candidates.filter(
-    (c) => pw.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_PRECEDING,
-  );
-  return before.length ? before[before.length - 1] : candidates[0];
-}
+  // --- exclusion gate (fail-closed until status is known) ------------------
+  // No listener acts until `ready` is set: before we know the configured server
+  // origin we must NOT show the CTA or stage credentials, or a race at t=0 could
+  // act on the JPassbolt app's own login page (the "never act on our own app"
+  // invariant). Unknown status therefore counts as excluded.
+  let serverOrigin: string | null = null;
+  let excludedHere = false;
+  let ready = false;
+  const active = () => ready && !excludedHere;
+  void (async () => {
+    try {
+      const status = await rpc({ type: 'GET_STATUS' });
+      if (status.serverUrl) {
+        try { serverOrigin = new URL(status.serverUrl).origin; } catch { /* ignore */ }
+      }
+    } catch { /* background unavailable — leave excluded until known */ }
+    excludedHere = !!serverOrigin && location.origin === serverOrigin;
+    ready = true;
+    if (active() && TOP) void checkPendingSave();
+  })();
 
-function setValue(input: HTMLInputElement, value: string): void {
-  const proto = Object.getPrototypeOf(input) as object;
-  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-  if (setter) setter.call(input, value);
-  else input.value = value;
-  // Fire the events frameworks (React/Vue/Angular) listen to.
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-}
+  // --- in-form CTA + menu (⑧⑨) --------------------------------------------
+  let ui: InForm | null = null;
+  const informUi = () => (ui ??= new InForm());
+  let hideTimer: number | undefined;
 
-function fill(username: string, password: string): boolean {
-  const pws = passwordFields();
-  if (pws.length === 0) return false;
-  const pw = pws[0];
-  if (username) {
-    const user = usernameFieldFor(pw);
-    if (user) setValue(user, username);
+  function eligibleField(t: EventTarget | null): HTMLInputElement | null {
+    if (!(t instanceof HTMLInputElement)) return null;
+    if (t.type === 'password') return t;
+    // a username-like text field that belongs to a login form
+    const pw = passwordFields()[0];
+    if (pw && (t.type === 'text' || t.type === 'email' || t.type === 'tel' || !t.getAttribute('type'))) {
+      return t === ctaAnchor() ? t : null;
+    }
+    return null;
   }
-  setValue(pw, password);
-  pw.focus();
-  return true;
+
+  document.addEventListener('focusin', (e) => {
+    if (!active()) return;
+    // Skip tiny sub-frames (ad/tracking iframes) — never a real login form.
+    if (!TOP && (window.innerWidth < 200 || window.innerHeight < 200)) return;
+    const field = eligibleField(e.target);
+    if (!field) return;
+    window.clearTimeout(hideTimer);
+    void (async () => {
+      let count = 0;
+      try { count = (await rpc({ type: 'FIND_FOR_URL', url: location.href })).items.length; } catch { /* show CTA with no badge */ }
+      informUi().showCta(field, count);
+    })();
+  }, true);
+
+  document.addEventListener('focusout', () => {
+    // Delay so a click on the CTA (which blurs the field) still registers, and
+    // never hide while the menu the click just opened is showing.
+    window.clearTimeout(hideTimer);
+    hideTimer = window.setTimeout(() => { if (!ui?.isMenuOpen()) ui?.hideCta(); }, 250);
+  }, true);
+
+  // --- autosave capture (⑩) ------------------------------------------------
+  function maybeStage(): void {
+    if (!active()) return;
+    const creds = captureCredentials();
+    if (!creds || !creds.password) return;
+    void rpc({
+      type: 'STAGE_SAVE',
+      name: (document.title || location.hostname).trim().slice(0, 200),
+      username: creds.username,
+      uri: location.href,
+      password: creds.password,
+    }).catch(() => undefined);
+  }
+
+  // Capture as early as possible — a login submit usually navigates away.
+  const SUBMIT_HINT = /log\s?in|sign\s?in|sign\s?on|continue|submit|登录|登入|登錄|登陆/i;
+  document.addEventListener('submit', maybeStage, true);
+  // Enter only stages when it lands on the login form (the password/username
+  // field or an element inside the same form) — not on any Enter anywhere.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const t = e.target;
+    if (!(t instanceof HTMLElement)) return;
+    const pw = passwordFields()[0];
+    if (!pw || !pw.value) return;
+    if (t === pw || t === ctaAnchor() || (pw.form?.contains(t) ?? false)) maybeStage();
+  }, true);
+  // SPA logins often POST via a button without a form submit. Only react to a
+  // submit-LIKE control while a password field actually holds a value, so we
+  // don't ship the plaintext to the background on unrelated button clicks.
+  document.addEventListener('click', (e) => {
+    const t = e.target as HTMLElement | null;
+    if (!t) return;
+    const btn = t.closest<HTMLElement>('button, input[type="submit"], [role="button"]');
+    if (!btn) return;
+    const looksSubmit = btn.getAttribute('type') === 'submit'
+      || SUBMIT_HINT.test(`${btn.textContent ?? ''} ${btn.getAttribute('aria-label') ?? ''} ${btn.id} ${(btn as HTMLInputElement).value ?? ''}`);
+    if (looksSubmit && passwordFields().some((p) => p.value)) maybeStage();
+  }, true);
+
+  async function checkPendingSave(): Promise<void> {
+    if (!active() || !TOP) return;
+    try {
+      const { pending } = await rpc({ type: 'GET_PENDING_SAVE' });
+      if (pending) {
+        informUi().showBanner(
+          pending,
+          () => void rpc({ type: 'COMMIT_SAVE' }).catch(() => undefined),
+          () => void rpc({ type: 'DISCARD_SAVE' }).catch(() => undefined),
+        );
+      }
+    } catch { /* nothing staged */ }
+  }
+
+  // --- SPA navigation + dynamic forms (⑦) ---------------------------------
+  let lastHref = location.href;
+  const onNav = () => {
+    ui?.hideCta();
+    ui?.closeMenu();
+    // A post-login route change is our best "logged in" signal in an SPA;
+    // re-check for a staged credential after the new view settles.
+    if (TOP) window.setTimeout(() => void checkPendingSave(), 700);
+  };
+  window.addEventListener('popstate', onNav);
+
+  // The page's router calls history.pushState in the MAIN world, which an
+  // isolated-world content script cannot intercept — so we detect SPA route
+  // changes by watching the shared location.href, and re-detect dynamic forms,
+  // both from one MutationObserver.
+  const mo = new MutationObserver(() => {
+    if (location.href !== lastHref) { lastHref = location.href; onNav(); }
+    if (ui && !document.contains(ctaAnchor())) { ui.hideCta(); ui.closeMenu(); }
+  });
+  try { mo.observe(document.documentElement, { childList: true, subtree: true }); } catch { /* ignore */ }
 }
-
-/** Find the page's one-time-code (TOTP/2FA) input, if any. */
-function oneTimeCodeField(): HTMLInputElement | null {
-  const explicit = Array.from(
-    document.querySelectorAll<HTMLInputElement>('input[autocomplete="one-time-code"]'),
-  ).filter(isVisible);
-  if (explicit.length) return explicit[0];
-
-  const candidates = Array.from(
-    document.querySelectorAll<HTMLInputElement>(
-      'input[type="text"], input[type="number"], input[type="tel"], input:not([type])',
-    ),
-  ).filter(isVisible);
-  const re = /otp|totp|2fa|mfa|one.?time|verif|auth.?code|security.?code|\btoken\b|\bcode\b/i;
-  const byHint = candidates.find((c) =>
-    re.test(`${c.autocomplete} ${c.name} ${c.id} ${c.getAttribute('aria-label') ?? ''} ${c.placeholder} ${c.getAttribute('inputmode') ?? ''}`),
-  );
-  if (byHint) return byHint;
-
-  // A short numeric field is the usual single-box OTP input.
-  return candidates.find((c) => c.maxLength > 0 && c.maxLength <= 8) ?? null;
-}
-
-function fillTotp(code: string): boolean {
-  // One-digit-per-box pattern (each <input maxlength="1">).
-  const boxes = Array.from(
-    document.querySelectorAll<HTMLInputElement>('input[maxlength="1"]'),
-  ).filter(isVisible);
-  if (boxes.length >= code.length) {
-    for (let i = 0; i < code.length; i++) setValue(boxes[i], code[i]);
-    boxes[code.length - 1].focus();
-    return true;
-  }
-  const field = oneTimeCodeField();
-  if (!field) return false;
-  setValue(field, code);
-  field.focus();
-  return true;
-}
-
-chrome.runtime.onMessage.addListener((msg: ContentReq, _sender, sendResponse) => {
-  if (msg.type === 'HAS_LOGIN_FORM') {
-    const res: ContentResult = { hasForm: passwordFields().length > 0, origin: location.origin };
-    sendResponse(res);
-    return;
-  }
-  if (msg.type === 'DO_FILL') {
-    const res: ContentResult = { filled: fill(msg.username, msg.password) };
-    sendResponse(res);
-    return;
-  }
-  if (msg.type === 'DO_FILL_TOTP') {
-    const res: ContentResult = { filled: fillTotp(msg.code) };
-    sendResponse(res);
-    return;
-  }
-});

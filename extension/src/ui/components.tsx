@@ -4,8 +4,8 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Copy, Dices, KeyRound, Loader2, Lock, LogIn, RefreshCw, Server, ShieldCheck } from 'lucide-react';
-import { rpc, type StatusResult, type VaultItem } from '../shared/messages';
+import { Copy, Dices, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Plus, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
 import { generateTotp, isValidTotp, type TotpConfig } from '../shared/totp';
 import {
   DEFAULT_PASSPHRASE_OPTIONS, DEFAULT_PASSWORD_OPTIONS,
@@ -353,6 +353,129 @@ export function PasswordGenerator({ onUse }: { onUse?: (value: string) => void }
           <Btn variant="primary" block onClick={() => onUse(value)}>Use this</Btn>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+// ---- create-resource form (shared by manual "New" + post-login autosave) --
+/** Rough Shannon-entropy estimate for a *typed* password from observed classes. */
+export function observedEntropy(pw: string): number {
+  if (!pw) return 0;
+  let pool = 0;
+  if (/[a-z]/.test(pw)) pool += 26;
+  if (/[A-Z]/.test(pw)) pool += 26;
+  if (/[0-9]/.test(pw)) pool += 10;
+  if (/[^a-zA-Z0-9]/.test(pw)) pool += 33;
+  return passwordEntropyBits(pw.length, pool || 1);
+}
+
+/**
+ * Create a password resource. The plaintext password/description are sent to the
+ * background in a single CREATE_RESOURCE rpc, which encrypts+signs them for the
+ * user's own key before POSTing — nothing here ever touches the server directly.
+ * `initial` pre-fills the form (used by autosave / "save current page").
+ */
+export function CreateResourceForm({ initial, onCreated, onCancel, compact }: {
+  initial?: Partial<CreateResourceInput>;
+  onCreated: (item: VaultItem) => void;
+  onCancel?: () => void;
+  compact?: boolean;
+}) {
+  const [name, setName] = useState(initial?.name ?? '');
+  const [username, setUsername] = useState(initial?.username ?? '');
+  const [uri, setUri] = useState(initial?.uri ?? '');
+  const [password, setPassword] = useState(initial?.password ?? '');
+  const [description, setDescription] = useState(initial?.description ?? '');
+  const [showPw, setShowPw] = useState(false);
+  const [showGen, setShowGen] = useState(false);
+  const [pwned, setPwned] = useState<number | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const strength = strengthFromEntropy(observedEntropy(password));
+  const canSubmit = name.trim().length > 0 && password.length > 0 && !busy;
+
+  const check = async () => {
+    if (!password) return;
+    setChecking(true);
+    try { setPwned((await rpc({ type: 'PWNED', password })).count); }
+    catch { setPwned(-1); }
+    finally { setChecking(false); }
+  };
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setErr(null); setBusy(true);
+    try {
+      const { item } = await rpc({
+        type: 'CREATE_RESOURCE',
+        input: { name: name.trim(), username: username.trim(), uri: uri.trim(), password, description },
+      });
+      onCreated(item);
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className={compact ? '' : 'jpb-card'}>
+      <div className="jpb-h2"><Plus size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />New password</div>
+
+      <div className="jpb-field" style={{ marginTop: 8 }}>
+        <label className="jpb-label">Name *</label>
+        <input className="jpb-input" value={name} autoFocus onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub" />
+      </div>
+      <div className="jpb-field">
+        <label className="jpb-label">Username</label>
+        <input className="jpb-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="you@example.com" />
+      </div>
+      <div className="jpb-field">
+        <label className="jpb-label">Website</label>
+        <input className="jpb-input" value={uri} onChange={(e) => setUri(e.target.value)} placeholder="https://example.com" />
+      </div>
+
+      <div className="jpb-field">
+        <label className="jpb-label">Password *</label>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            className="jpb-input"
+            style={{ flex: 1 }}
+            type={showPw ? 'text' : 'password'}
+            value={password}
+            onChange={(e) => { setPassword(e.target.value); setPwned(null); }}
+            placeholder="Enter or generate"
+          />
+          <Btn small variant="ghost" title={showPw ? 'Hide' : 'Show'} onClick={() => setShowPw((s) => !s)}>{showPw ? <EyeOff size={14} /> : <Eye size={14} />}</Btn>
+          <Btn small variant="ghost" title="Generator" onClick={() => setShowGen((s) => !s)}><Dices size={14} /></Btn>
+        </div>
+        {password ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
+            <span className={`jpb-strength ${strength.cls}`}>{strength.label}</span>
+            <span style={{ flex: 1 }} />
+            <Btn small variant="ghost" onClick={check} disabled={checking}><ShieldAlert size={13} /> {checking ? 'Checking…' : 'Breach check'}</Btn>
+          </div>
+        ) : null}
+        {pwned !== null ? (
+          pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>Breach check unavailable.</div>
+            : pwned === 0 ? <div className="jpb-ok">Not found in known breaches.</div>
+              : <div className="jpb-error">Found in {pwned.toLocaleString()} known breaches — choose another.</div>
+        ) : null}
+      </div>
+
+      {showGen ? (
+        <PasswordGenerator onUse={(v) => { setPassword(v); setPwned(null); setShowGen(false); setShowPw(true); }} />
+      ) : null}
+
+      <div className="jpb-field">
+        <label className="jpb-label">Description</label>
+        <textarea className="jpb-textarea" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Encrypted with the secret" />
+      </div>
+
+      <ErrorMsg text={err} />
+      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        <Btn variant="primary" block onClick={submit} disabled={!canSubmit}><Save size={14} /> {busy ? 'Saving…' : 'Save password'}</Btn>
+        {onCancel ? <Btn variant="ghost" onClick={onCancel} title="Cancel"><X size={14} /></Btn> : null}
+      </div>
     </div>
   );
 }
