@@ -1,0 +1,28 @@
+{
+  "name": "jpassbolt-extension",
+  "private": true,
+  "version": "0.1.0",
+  "description": "JPassbolt browser extension — Aegis-styled, Passbolt-compatible E2EE password manager client. Keys and crypto live in the isolated background service worker; the UI never touches private key material.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "zip": "cd dist && zip -r -FS ../jpassbolt-extension.zip . && cd .."
+  },
+  "dependencies": {
+    "lucide-react": "^0.577.0",
+    "openpgp": "^6.3.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@crxjs/vite-plugin": "beta",
+    "@types/chrome": "latest",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.9.3",
+    "vite": "^6.3.5"
+  }
+}
