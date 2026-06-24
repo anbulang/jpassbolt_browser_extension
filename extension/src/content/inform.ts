@@ -50,9 +50,11 @@ const STYLE = `
 .banner .t { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; margin-bottom: 4px; }
 .banner .logo { width: 22px; height: 22px; border-radius: 6px; background: #4263eb; color: #fff; display: grid; place-items: center; font-size: 10px; font-weight: 700; }
 .banner .d { font-size: 12.5px; color: #6b7280; line-height: 1.45; margin-bottom: 12px; word-break: break-all; }
+.banner .err { font-size: 12px; color: #c92a2a; line-height: 1.4; margin: -4px 0 10px; }
 .banner .btns { display: flex; gap: 8px; }
 .btn { flex: 1; height: 34px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid #e5e7eb; background: #f7f7f9; color: #374151; }
 .btn:hover { background: #eef0f4; }
+.btn:disabled { opacity: .6; cursor: default; }
 .btn.primary { background: #4263eb; border-color: #4263eb; color: #fff; }
 .btn.primary:hover { background: #3b4fd1; }
 `;
@@ -127,6 +129,28 @@ export class InForm {
     return !!this.panel;
   }
 
+  isCtaVisible(): boolean {
+    return !!this.cta && this.cta.style.display !== 'none';
+  }
+
+  /** Is the element the CTA is actually pinned to still in the document? */
+  isAnchorConnected(): boolean {
+    return !!this.anchor?.isConnected;
+  }
+
+  private anchorFocused(): boolean {
+    const a = this.anchor;
+    if (!a) return false;
+    const root = a.getRootNode() as Document | ShadowRoot;
+    return a === document.activeElement || a === root.activeElement;
+  }
+
+  /** Close the menu and, if the field has since lost focus, retire the badge too. */
+  private dismissMenu(): void {
+    this.closeMenu();
+    if (!this.anchorFocused()) this.hideCta();
+  }
+
   private place(): void {
     if (this.cta && this.cta.style.display !== 'none' && this.anchor) {
       const r = this.anchor.getBoundingClientRect();
@@ -174,7 +198,7 @@ export class InForm {
 
     const open = el('button', 'row');
     open.appendChild(el('div', 'action', '↗  Open JPassbolt'));
-    open.addEventListener('click', () => { window.open(chrome.runtime.getURL('app.html'), '_blank'); this.closeMenu(); });
+    open.addEventListener('click', () => { window.open(chrome.runtime.getURL('app.html'), '_blank'); this.dismissMenu(); });
     panel.appendChild(open);
 
     this.panel = panel;
@@ -201,22 +225,22 @@ export class InForm {
     const fields = passwordFields();
     for (const f of fields) setValue(f, pw); // fill confirm fields too (signup)
     void rpc({ type: 'COPY', text: pw, temporary: true }).catch(() => undefined);
-    this.closeMenu();
+    this.dismissMenu();
   }
 
   private readonly onDocClick = (e: MouseEvent): void => {
     if (!this.panel) return;
     // Clicks land on the host element (the shadow boundary), so a click whose
     // composedPath does not include our host is "outside" -> dismiss.
-    if (!e.composedPath().includes(this.host)) this.closeMenu();
+    if (!e.composedPath().includes(this.host)) this.dismissMenu();
   };
 
   private readonly onKey = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape') this.closeMenu();
+    if (e.key === 'Escape') this.dismissMenu();
   };
 
   // ---- autosave banner ---------------------------------------------------
-  showBanner(p: { name: string; username: string; uri: string }, onSave: () => void, onDismiss: () => void): void {
+  showBanner(p: { name: string; username: string; uri: string }, onSave: () => Promise<void>, onDismiss: () => void): void {
     this.hideBanner();
     const b = el('div', 'banner');
     const t = el('div', 't');
@@ -224,11 +248,24 @@ export class InForm {
     b.appendChild(t);
     const who = p.username ? `${p.username} · ${hostOf(p.uri)}` : hostOf(p.uri);
     b.appendChild(el('div', 'd', who));
+    const err = el('div', 'err');
+    err.style.display = 'none';
+    b.appendChild(err);
     const btns = el('div', 'btns');
     const dismiss = el('button', 'btn', 'Not now');
     const save = el('button', 'btn primary', 'Save');
     dismiss.addEventListener('click', () => { this.hideBanner(); onDismiss(); });
-    save.addEventListener('click', () => { this.hideBanner(); onSave(); });
+    // Await the save; on failure keep the banner open (with the reason) so the
+    // user can retry — the staged credential survives a failed create.
+    save.addEventListener('click', () => {
+      save.disabled = true; dismiss.disabled = true; save.textContent = 'Saving…';
+      err.style.display = 'none';
+      onSave().then(() => this.hideBanner()).catch((e: unknown) => {
+        save.disabled = false; dismiss.disabled = false; save.textContent = 'Retry';
+        err.textContent = e instanceof Error ? e.message : String(e);
+        err.style.display = 'block';
+      });
+    });
     btns.append(dismiss, save);
     b.appendChild(btns);
     this.banner = b;

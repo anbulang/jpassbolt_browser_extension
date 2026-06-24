@@ -28,7 +28,7 @@ export interface TotpResult {
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
 /** Decode an RFC 4648 base32 string (the format Passbolt/authenticators use). */
-function base32Decode(input: string): Uint8Array {
+function base32Decode(input: string): Uint8Array<ArrayBuffer> {
   const clean = input.replace(/=+$/, '').replace(/\s+/g, '').toUpperCase();
   const out: number[] = [];
   let bits = 0;

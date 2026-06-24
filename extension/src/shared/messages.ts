@@ -114,8 +114,7 @@ export async function rpc<K extends Req['type']>(
 
 // ---- Background -> content script (autofill) -----------------------------
 export type ContentReq =
-  | { type: 'HAS_LOGIN_FORM' }
   | { type: 'DO_FILL'; username: string; password: string }
   | { type: 'DO_FILL_TOTP'; code: string };
 
-export type ContentResult = { hasForm: boolean; origin: string } | { filled: boolean };
+export type ContentResult = { filled: boolean };

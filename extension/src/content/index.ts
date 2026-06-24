@@ -33,22 +33,6 @@ function init(): void {
     document.documentElement.setAttribute('data-jpassbolt-extension', chrome.runtime.getManifest().version);
   } catch { /* not a normal DOM document */ }
 
-  // --- background-driven autofill (existing protocol) ----------------------
-  chrome.runtime.onMessage.addListener((msg: ContentReq, _sender, sendResponse) => {
-    if (msg.type === 'HAS_LOGIN_FORM') {
-      sendResponse({ hasForm: passwordFields().length > 0, origin: location.origin } as ContentResult);
-      return;
-    }
-    if (msg.type === 'DO_FILL') {
-      sendResponse({ filled: fill(msg.username, msg.password) } as ContentResult);
-      return;
-    }
-    if (msg.type === 'DO_FILL_TOTP') {
-      sendResponse({ filled: fillTotp(msg.code) } as ContentResult);
-      return;
-    }
-  });
-
   // --- exclusion gate (fail-closed until status is known) ------------------
   // No listener acts until `ready` is set: before we know the configured server
   // origin we must NOT show the CTA or stage credentials, or a race at t=0 could
@@ -69,6 +53,22 @@ function init(): void {
     ready = true;
     if (active() && TOP) void checkPendingSave();
   })();
+
+  // --- background-driven autofill ------------------------------------------
+  // Gated by active(): fail-closed before the exclusion status is known and on
+  // our own JPassbolt app origin, so a REVEAL'd plaintext is never typed into
+  // the app's own pages (or acted on before we know the server origin).
+  chrome.runtime.onMessage.addListener((msg: ContentReq, _sender, sendResponse) => {
+    if (!active()) { sendResponse({ filled: false } as ContentResult); return; }
+    if (msg.type === 'DO_FILL') {
+      sendResponse({ filled: fill(msg.username, msg.password) } as ContentResult);
+      return;
+    }
+    if (msg.type === 'DO_FILL_TOTP') {
+      sendResponse({ filled: fillTotp(msg.code) } as ContentResult);
+      return;
+    }
+  });
 
   // --- in-form CTA + menu (⑧⑨) --------------------------------------------
   let ui: InForm | null = null;
@@ -96,6 +96,11 @@ function init(): void {
     void (async () => {
       let count = 0;
       try { count = (await rpc({ type: 'FIND_FOR_URL', url: location.href })).items.length; } catch { /* show CTA with no badge */ }
+      // The round-trip may outlive the focus (a cold SW can take >250ms, longer
+      // than the focusout hide timer): only show the CTA if this field is STILL
+      // focused, else we'd re-show a badge for a field the user already left.
+      const root = field.getRootNode() as Document | ShadowRoot;
+      if (field !== document.activeElement && field !== root.activeElement) return;
       informUi().showCta(field, count);
     })();
   }, true);
@@ -154,7 +159,9 @@ function init(): void {
       if (pending) {
         informUi().showBanner(
           pending,
-          () => void rpc({ type: 'COMMIT_SAVE' }).catch(() => undefined),
+          // Return the promise so the banner can surface a failure and let the
+          // user retry (the staged credential survives a failed create now).
+          () => rpc({ type: 'COMMIT_SAVE' }).then(() => undefined),
           () => void rpc({ type: 'DISCARD_SAVE' }).catch(() => undefined),
         );
       }
@@ -175,10 +182,20 @@ function init(): void {
   // The page's router calls history.pushState in the MAIN world, which an
   // isolated-world content script cannot intercept — so we detect SPA route
   // changes by watching the shared location.href, and re-detect dynamic forms,
-  // both from one MutationObserver.
+  // both from one MutationObserver. The DOM-liveness check is coalesced into a
+  // single rAF and only runs while a CTA is actually shown, so a mutation-heavy
+  // SPA does not trigger a layout-thrashing field scan on every mutation.
+  let scanScheduled = false;
   const mo = new MutationObserver(() => {
     if (location.href !== lastHref) { lastHref = location.href; onNav(); }
-    if (ui && !document.contains(ctaAnchor())) { ui.hideCta(); ui.closeMenu(); }
+    if (!ui?.isCtaVisible() || scanScheduled) return;
+    scanScheduled = true;
+    requestAnimationFrame(() => {
+      scanScheduled = false;
+      // Check the element the CTA is actually pinned to (not a recomputed
+      // ctaAnchor(), which can resolve to a different field across steps).
+      if (ui?.isCtaVisible() && !ui.isAnchorConnected()) { ui.hideCta(); ui.closeMenu(); }
+    });
   });
   try { mo.observe(document.documentElement, { childList: true, subtree: true }); } catch { /* ignore */ }
 }

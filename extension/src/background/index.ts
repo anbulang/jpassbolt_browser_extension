@@ -217,10 +217,15 @@ async function listResources(force = false): Promise<VaultItem[]> {
 
 /** Live resource-type catalogue (cached); used to resolve a create's type id. */
 async function listResourceTypes(): Promise<RawResourceType[]> {
-  if (!resourceTypeCache) {
-    resourceTypeCache = await apiCall<RawResourceType[]>('GET', '/resource-types.json').catch(() => []);
+  // Cache only a successful, non-empty fetch. An empty array is truthy, so
+  // caching a failed first fetch would pin the seed-UUID fallback for the whole
+  // session even after connectivity returns; re-try until we get a real list.
+  if (!resourceTypeCache || resourceTypeCache.length === 0) {
+    const fetched = await apiCall<RawResourceType[]>('GET', '/resource-types.json').catch(() => null);
+    if (fetched && fetched.length) resourceTypeCache = fetched;
+    return fetched ?? [];
   }
-  return resourceTypeCache ?? [];
+  return resourceTypeCache;
 }
 
 /**
@@ -289,13 +294,29 @@ function hostOf(u: string): string {
   }
 }
 
+/**
+ * True if `host` is exactly `base` or a subdomain of it. ONE-directional on
+ * purpose: a credential scoped to login.example.com must NOT be treated as a
+ * match for a broader example.com (or a bare public suffix) frame — that is the
+ * direction that would leak plaintext to a different-origin parent. `base` must
+ * contain a dot so a garbage/bare-TLD host ("com") never matches everything.
+ * Not full public-suffix-aware, but it removes the dangerous over-matches.
+ */
+function isHostOrSub(host: string, base: string): boolean {
+  if (!host || !base || !base.includes('.')) return false;
+  return host === base || host.endsWith('.' + base);
+}
+
 async function findForUrl(url: string): Promise<VaultItem[]> {
   const target = hostOf(url);
   if (!target) return [];
   const items = await listResources();
+  // Suggest an item when the page is on the item's host (or a subdomain of it),
+  // or vice-versa. isHostOrSub rejects bare-suffix matches so a junk uri like
+  // "com" no longer matches every site.
   return items.filter((i) => {
     const h = hostOf(i.uri);
-    return h && (h === target || target.endsWith('.' + h) || h.endsWith('.' + target));
+    return !!h && (isHostOrSub(target, h) || isHostOrSub(h, target));
   });
 }
 
@@ -392,8 +413,13 @@ async function getPendingSave(tabId: number): Promise<{ pending: { name: string;
 async function commitSave(tabId: number): Promise<{ item: VaultItem }> {
   const p = pendingSaves.get(tabId);
   if (!p) throw new Error('Nothing to save.');
+  // Create FIRST; drop the staged plaintext only once the resource is persisted.
+  // A recoverable failure (auto-locked vault, expired JWT, server/network error)
+  // then leaves the captured credential available for a retry instead of losing
+  // the only in-memory copy. lock() still purges it independently.
+  const result = await createResource({ name: p.name, username: p.username, uri: p.uri, password: p.password, description: '' });
   pendingSaves.delete(tabId);
-  return createResource({ name: p.name, username: p.username, uri: p.uri, password: p.password, description: '' });
+  return result;
 }
 
 function discardSave(tabId: number): { ok: true } {
@@ -526,25 +552,29 @@ async function targetTabId(explicit?: number): Promise<number> {
  * (which resolves with a nondeterministic first responder) is not enough.
  */
 async function fillAcrossFrames(tabId: number, msg: ContentReq, wantedHost?: string): Promise<boolean> {
-  let frameIds: number[] = [0];
+  let frames: chrome.webNavigation.GetAllFrameResultDetails[] | null = null;
   try {
-    const frames = await chrome.webNavigation.getAllFrames({ tabId });
-    if (frames && frames.length) {
-      let pick = frames;
-      if (wantedHost) {
-        // Only deliver the cleartext to frames whose origin matches the
-        // resource host — never into an unrelated cross-origin sub-frame
-        // (e.g. an embedded ad/widget iframe). Else fall back to the top frame.
-        const matched = frames.filter((f) => {
-          const h = hostOf(f.url ?? '');
-          return h && (h === wantedHost || h.endsWith('.' + wantedHost) || wantedHost.endsWith('.' + h));
-        });
-        pick = matched.length ? matched : frames.filter((f) => f.frameId === 0);
-      }
-      frameIds = pick.map((f) => f.frameId).sort((a, b) => a - b);
-    }
-  } catch { /* webNavigation unavailable — fall back to the top frame */ }
-  if (frameIds.length === 0) frameIds = [0];
+    frames = await chrome.webNavigation.getAllFrames({ tabId });
+  } catch { /* webNavigation unavailable */ }
+
+  let frameIds: number[];
+  if (wantedHost) {
+    // Deliver the decrypted cleartext ONLY to frames on the resource's own host
+    // (exact or a subdomain). If NOTHING matches — including the top frame —
+    // refuse: never type site-A's password into a mismatched/cross-origin frame,
+    // and never broadcast it to unrelated sub-frames (ads/widgets/trackers).
+    frameIds = (frames ?? [])
+      .filter((f) => isHostOrSub(hostOf(f.url ?? ''), wantedHost))
+      .map((f) => f.frameId)
+      .sort((a, b) => a - b);
+    // No frame inventory at all (permission/edge) -> we cannot prove the top
+    // frame's host, so refuse rather than blind-fill a possibly-wrong site.
+  } else {
+    // Unknown intended host (a uri-less item the user explicitly chose to fill):
+    // target the visible TOP frame only — never sub-frames.
+    frameIds = [0];
+  }
+
   for (const frameId of frameIds) {
     const res = (await chrome.tabs.sendMessage(tabId, msg, { frameId }).catch(() => null)) as ContentResult | null;
     if (res && 'filled' in res && res.filled) return true;
