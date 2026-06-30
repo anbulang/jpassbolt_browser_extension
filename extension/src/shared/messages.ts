@@ -5,6 +5,7 @@
 
 import type { TotpConfig } from './totp';
 export type { TotpConfig } from './totp';
+import { t } from './i18n';
 
 export type VaultPhase = 'no_server' | 'no_account' | 'locked' | 'unlocked';
 
@@ -59,6 +60,10 @@ export type Req =
   | { type: 'UNLOCK'; passphrase: string }
   | { type: 'LOCK' }
   | { type: 'LOGOUT' }
+  // Open the quickaccess popup (from the in-page menu). The background opens the
+  // real action popup when it can, else a detached quickaccess window — never a
+  // full-page tab.
+  | { type: 'OPEN_QUICKACCESS' }
   | { type: 'LIST'; force?: boolean }
   | { type: 'REVEAL'; id: string }
   | { type: 'FIND_FOR_URL'; url: string }
@@ -84,6 +89,7 @@ export interface RespMap {
   UNLOCK: StatusResult;
   LOCK: StatusResult;
   LOGOUT: StatusResult;
+  OPEN_QUICKACCESS: { ok: true };
   LIST: { items: VaultItem[] };
   REVEAL: { item: VaultItem; secret: SecretFields };
   FIND_FOR_URL: { items: VaultItem[] };
@@ -107,7 +113,7 @@ export async function rpc<K extends Req['type']>(
   msg: Extract<Req, { type: K }>,
 ): Promise<RespMap[K]> {
   const res = (await chrome.runtime.sendMessage(msg)) as RpcResult<RespMap[K]> | undefined;
-  if (!res) throw new Error('No response from the background service worker.');
+  if (!res) throw new Error(t('bg.noResponse'));
   if (!res.ok) throw new Error(res.error);
   return res.data;
 }

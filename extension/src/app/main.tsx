@@ -8,6 +8,7 @@ import {
   Btn, CreateResourceForm, ErrorMsg, Flow, Header, Spinner, TotpView, initials, useStatus, useVault,
 } from '../ui/components';
 import { rpc, type SecretFields, type StatusResult, type VaultItem } from '../shared/messages';
+import { t } from '../shared/i18n';
 
 /**
  * The web page the full-page app should act on. The app lives in its own
@@ -41,28 +42,28 @@ function Detail({ item }: { item: VaultItem }) {
       const s = secret ?? (await rpc({ type: 'REVEAL', id: item.id })).secret;
       setSecret(s);
       await rpc({ type: 'COPY', text: s.password, temporary: true });
-      setFlash('Copied · clears in 30s'); setTimeout(() => setFlash(null), 1800);
+      setFlash(t('detail.copied30s')); setTimeout(() => setFlash(null), 1800);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   };
   const fill = async () => {
     try {
       const tab = await lastWebTab();
-      if (!tab?.id) { setErr('No open web page to fill — open the site first.'); return; }
+      if (!tab?.id) { setErr(t('detail.noOpenPage')); return; }
       const r = await rpc({ type: 'FILL', id: item.id, tabId: tab.id });
-      setFlash(r.filled ? 'Filled the page' : 'No login form on that page');
+      setFlash(r.filled ? t('detail.filledPage') : t('detail.noLoginFormPage'));
       setTimeout(() => setFlash(null), 2200);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   };
   const copyTotp = async (code: string) => {
-    try { await rpc({ type: 'COPY', text: code, temporary: true }); setFlash('Code copied · clears in 30s'); setTimeout(() => setFlash(null), 1800); }
+    try { await rpc({ type: 'COPY', text: code, temporary: true }); setFlash(t('detail.codeCopied30s')); setTimeout(() => setFlash(null), 1800); }
     catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   };
   const fillTotpOnPage = async () => {
     try {
       const tab = await lastWebTab();
-      if (!tab?.id) { setErr('No open web page to fill — open the site first.'); return; }
+      if (!tab?.id) { setErr(t('detail.noOpenPage')); return; }
       const r = await rpc({ type: 'FILL_TOTP', id: item.id, tabId: tab.id });
-      setFlash(r.filled ? 'Filled the code' : 'No code field on that page');
+      setFlash(r.filled ? t('detail.filledCode') : t('detail.noCodeField'));
       setTimeout(() => setFlash(null), 2200);
     } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
   };
@@ -85,22 +86,22 @@ function Detail({ item }: { item: VaultItem }) {
       </div>
 
       <div className="jpb-field" style={{ margin: 0 }}>
-        <span className="jpb-label">Username</span>
-        <div className="jpb-secret-val" style={{ fontFamily: 'var(--sans)' }}>{item.username || '—'}</div>
+        <span className="jpb-label">{t('detail.username')}</span>
+        <div className="jpb-secret-val" style={{ fontFamily: 'var(--sans)' }}>{item.username || t('common.dash')}</div>
       </div>
 
       <div className="jpb-field" style={{ margin: 0 }}>
-        <span className="jpb-label">Password</span>
+        <span className="jpb-label">{t('detail.password')}</span>
         {secret ? (
           <div className="jpb-secret-val">{show ? secret.password : '••••••••••'}</div>
         ) : (
-          <div className="jpb-secret-val" style={{ color: 'var(--text-muted)' }}>•••••••• (locked)</div>
+          <div className="jpb-secret-val" style={{ color: 'var(--text-muted)' }}>{t('detail.passwordLocked')}</div>
         )}
       </div>
 
       {secret?.description ? (
         <div className="jpb-field" style={{ margin: 0 }}>
-          <span className="jpb-label">Description</span>
+          <span className="jpb-label">{t('detail.description')}</span>
           <div className="jpb-secret-val" style={{ fontFamily: 'var(--sans)' }}>{secret.description}</div>
         </div>
       ) : null}
@@ -110,20 +111,20 @@ function Detail({ item }: { item: VaultItem }) {
       <ErrorMsg text={err} />
       {flash ? <div className="jpb-ok">{flash}</div> : null}
       {pwned !== null ? (
-        pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>Breach check unavailable.</div>
-          : pwned === 0 ? <div className="jpb-ok">Not found in known breaches.</div>
-            : <div className="jpb-error">Found in {pwned.toLocaleString()} known breaches — consider changing it.</div>
+        pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>{t('breach.unavailable')}</div>
+          : pwned === 0 ? <div className="jpb-ok">{t('breach.notFound')}</div>
+            : <div className="jpb-error">{t('breach.foundConsiderChanging', { count: pwned.toLocaleString() })}</div>
       ) : null}
 
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
         {!secret ? (
-          <Btn variant="primary" onClick={reveal} disabled={busy}><Eye size={14} /> {busy ? 'Decrypting…' : 'Reveal'}</Btn>
+          <Btn variant="primary" onClick={reveal} disabled={busy}><Eye size={14} /> {busy ? t('detail.decrypting') : t('detail.reveal')}</Btn>
         ) : (
-          <Btn onClick={() => setShow((s) => !s)}>{show ? <><EyeOff size={14} /> Hide</> : <><Eye size={14} /> Show</>}</Btn>
+          <Btn onClick={() => setShow((s) => !s)}>{show ? <><EyeOff size={14} /> {t('detail.hide')}</> : <><Eye size={14} /> {t('detail.show')}</>}</Btn>
         )}
-        <Btn onClick={copy}><Copy size={14} /> Copy password</Btn>
-        <Btn onClick={fill}><LogIn size={14} /> Fill active tab</Btn>
-        {secret ? <Btn onClick={checkBreach} disabled={checking}><ShieldAlert size={14} /> {checking ? 'Checking…' : 'Breach check'}</Btn> : null}
+        <Btn onClick={copy}><Copy size={14} /> {t('detail.copyPassword')}</Btn>
+        <Btn onClick={fill}><LogIn size={14} /> {t('detail.fillActiveTab')}</Btn>
+        {secret ? <Btn onClick={checkBreach} disabled={checking}><ShieldAlert size={14} /> {checking ? t('detail.checking') : t('detail.breachCheck')}</Btn> : null}
       </div>
     </div>
   );
@@ -147,21 +148,21 @@ function Vault() {
         <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
           <div style={{ position: 'relative', flex: 1 }}>
             <Search size={15} style={{ position: 'absolute', left: 10, top: 10, color: 'var(--text-muted)' }} />
-            <input className="jpb-search" style={{ paddingLeft: 32 }} placeholder="Search…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <input className="jpb-search" style={{ paddingLeft: 32 }} placeholder={t('vault.searchShort')} value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
-          <Btn variant="primary" title="New password" onClick={() => { setCreating(true); setSelected(null); }}><Plus size={14} /> New</Btn>
-          <Btn variant="ghost" title="Refresh" onClick={() => reload(true)}><RefreshCw size={14} /></Btn>
+          <Btn variant="primary" title={t('create.title')} onClick={() => { setCreating(true); setSelected(null); }}><Plus size={14} /> {t('common.new')}</Btn>
+          <Btn variant="ghost" title={t('common.refresh')} onClick={() => reload(true)}><RefreshCw size={14} /></Btn>
         </div>
         <ErrorMsg text={err} />
-        {!items ? <Spinner label="Loading vault…" /> :
-          filtered.length === 0 ? <div className="jpb-empty">No passwords yet.</div> :
+        {!items ? <Spinner label={t('flow.loadingVault')} /> :
+          filtered.length === 0 ? <div className="jpb-empty">{t('vault.noneYet')}</div> :
             <div className="jpb-list" style={{ maxHeight: '70vh' }}>
               {filtered.map((i) => (
                 <div key={i.id} className="jpb-row" onClick={() => { setSelected(i); setCreating(false); }} style={selected?.id === i.id ? { background: 'var(--surface-2)', borderColor: 'var(--border)' } : undefined}>
                   <div className="jpb-row-icon">{initials(i.name)}</div>
                   <div className="jpb-row-main">
                     <div className="jpb-row-name">{i.name}</div>
-                    <div className="jpb-row-sub">{i.username || i.uri || '—'}</div>
+                    <div className="jpb-row-sub">{i.username || i.uri || t('common.dash')}</div>
                   </div>
                 </div>
               ))}
@@ -176,7 +177,7 @@ function Vault() {
         ) : selected ? (
           <Detail key={selected.id} item={selected} />
         ) : (
-          <div className="jpb-card jpb-empty">Select a password to view its details, or create a new one.</div>
+          <div className="jpb-card jpb-empty">{t('vault.selectHint')}</div>
         )}
       </div>
     </div>
@@ -191,7 +192,7 @@ function App() {
       <Header
         account={status?.account ?? null}
         onLock={status?.phase === 'unlocked' ? lock : undefined}
-        right={<Btn small variant="ghost" title="Settings" onClick={() => chrome.runtime.openOptionsPage()}><Settings size={14} /></Btn>}
+        right={<Btn small variant="ghost" title={t('header.settings')} onClick={() => chrome.runtime.openOptionsPage()}><Settings size={14} /></Btn>}
       />
       <div className="jpb-body">
         <Flow status={status} onChange={(s: StatusResult) => setStatus(s)}>

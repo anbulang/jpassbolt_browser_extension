@@ -31,6 +31,7 @@ import type {
 } from '../shared/messages';
 import { generateTotp, isValidTotp } from '../shared/totp';
 import { pwnedCount } from '../shared/pwned';
+import { t } from '../shared/i18n';
 
 // ---------------------------------------------------------------------------
 // storage
@@ -98,7 +99,7 @@ interface Envelope<T> {
 
 async function apiBase(): Promise<string> {
   const url = await get<string>(K.serverUrl);
-  if (!url) throw new Error('No server configured. Open Settings and set your JPassbolt server URL.');
+  if (!url) throw new Error(t('bg.noServerConfigured'));
   return url.replace(/\/+$/, '') + '/api';
 }
 
@@ -126,11 +127,11 @@ async function apiCall<T>(
     // session expired -> drop credentials, force re-auth
     await del([K.jwt]);
     lock();
-    throw new Error('Session expired. Please unlock again.');
+    throw new Error(t('bg.sessionExpired'));
   }
   const json = (await res.json().catch(() => null)) as Envelope<T> | null;
   if (!res.ok || !json) {
-    throw new Error(json?.header?.message || `Request failed (${res.status}).`);
+    throw new Error(json?.header?.message || t('bg.requestFailed', { status: res.status }));
   }
   return json.body as T;
 }
@@ -148,9 +149,9 @@ async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: string }>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: { gpg_auth: { keyid: fingerprint } } }),
   });
-  if (stage1.status === 404) throw new Error('No account on the server matches this key.');
+  if (stage1.status === 404) throw new Error(t('bg.noAccountMatchesKey'));
   const encryptedToken = stage1.headers.get('x-gpgauth-user-auth-token');
-  if (!encryptedToken) throw new Error('Server did not return a GPGAuth challenge token.');
+  if (!encryptedToken) throw new Error(t('bg.noChallengeToken'));
 
   // PHP urlencode() semantics: '+' is a space, real '+' arrive as '%2B'.
   const armored = decodeURIComponent(encryptedToken.replace(/\+/g, ' '));
@@ -167,7 +168,7 @@ async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: string }>
   });
   const authHeader = stage2.headers.get('authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new Error('Authentication failed: no JWT returned.');
+    throw new Error(t('bg.authFailedNoJwt'));
   }
   return { jwt: authHeader.substring(7) };
 }
@@ -200,7 +201,7 @@ const RESOURCE_TYPE_ID = {
 function toItem(r: RawResource): VaultItem {
   return {
     id: r.id,
-    name: r.name || '(encrypted item)',
+    name: r.name || t('bg.encryptedItem'),
     username: r.username || '',
     uri: r.uri || '',
     resourceTypeId: r.resource_type_id || '',
@@ -242,10 +243,10 @@ async function passwordAndDescriptionTypeId(): Promise<string> {
 
 /** Decrypt the current user's secret for a resource into named fields. */
 async function revealSecret(id: string): Promise<{ item: VaultItem; secret: SecretFields }> {
-  if (!unlockedKey) throw new Error('Vault is locked.');
+  if (!unlockedKey) throw new Error(t('bg.vaultLocked'));
   const items = await listResources();
   const item = items.find((i) => i.id === id);
-  if (!item) throw new Error('Resource not found.');
+  if (!item) throw new Error(t('bg.resourceNotFound'));
 
   const sec = await apiCall<RawSecret>('GET', `/secrets/resource/${id}.json`);
   const message = await openpgp.readMessage({ armoredMessage: sec.data });
@@ -325,7 +326,7 @@ async function findForUrl(url: string): Promise<VaultItem[]> {
 // ---------------------------------------------------------------------------
 async function ownPublicKeyArmored(): Promise<string> {
   const pub = await get<string>(K.publicKey);
-  if (!pub) throw new Error('Your public key is unavailable. Re-import your key in Settings.');
+  if (!pub) throw new Error(t('bg.publicKeyUnavailable'));
   return pub;
 }
 
@@ -335,7 +336,7 @@ async function ownPublicKeyArmored(): Promise<string> {
  * zero-knowledge is preserved (the server only ever sees ciphertext).
  */
 async function encryptForSelf(plaintext: string): Promise<string> {
-  if (!unlockedKey) throw new Error('Vault is locked.');
+  if (!unlockedKey) throw new Error(t('bg.vaultLocked'));
   const pub = await openpgp.readKey({ armoredKey: await ownPublicKeyArmored() });
   const message = await openpgp.createMessage({ text: plaintext });
   const armored = await openpgp.encrypt({
@@ -352,10 +353,10 @@ async function encryptForSelf(plaintext: string): Promise<string> {
  * server-side), then invalidates the cache so the item appears everywhere.
  */
 async function createResource(input: CreateResourceInput): Promise<{ item: VaultItem }> {
-  if (!unlockedKey) throw new Error('Vault is locked.');
+  if (!unlockedKey) throw new Error(t('bg.vaultLocked'));
   const name = input.name.trim();
-  if (!name) throw new Error('A name is required.');
-  if (!input.password) throw new Error('A password is required.');
+  if (!name) throw new Error(t('bg.nameRequired'));
+  if (!input.password) throw new Error(t('bg.passwordRequired'));
 
   const resourceTypeId = await passwordAndDescriptionTypeId();
   // password-and-description: the description is encrypted INSIDE the secret JSON;
@@ -412,7 +413,7 @@ async function getPendingSave(tabId: number): Promise<{ pending: { name: string;
 
 async function commitSave(tabId: number): Promise<{ item: VaultItem }> {
   const p = pendingSaves.get(tabId);
-  if (!p) throw new Error('Nothing to save.');
+  if (!p) throw new Error(t('bg.nothingToSave'));
   // Create FIRST; drop the staged plaintext only once the resource is persisted.
   // A recoverable failure (auto-locked vault, expired JWT, server/network error)
   // then leaves the captured credential available for a retry instead of losing
@@ -459,12 +460,10 @@ async function importKey(armoredPrivateKey: string): Promise<StatusResult> {
   try {
     key = await openpgp.readPrivateKey({ armoredKey: armoredPrivateKey });
   } catch {
-    throw new Error('Invalid OpenPGP private key.');
+    throw new Error(t('bg.invalidPrivateKey'));
   }
   if (key.isDecrypted()) {
-    throw new Error(
-      'This private key is not passphrase-protected. JPassbolt refuses to store an unprotected key.',
-    );
+    throw new Error(t('bg.keyNotProtected'));
   }
   await set({
     [K.privateKey]: armoredPrivateKey,
@@ -486,19 +485,19 @@ async function unlock(passphrase: string): Promise<StatusResult> {
 
   const armored = await get<string>(K.privateKey);
   const serverUrl = await get<string>(K.serverUrl);
-  if (!serverUrl) throw new Error('No server configured.');
-  if (!armored) throw new Error('No private key imported yet.');
+  if (!serverUrl) throw new Error(t('bg.noServerConfiguredShort'));
+  if (!armored) throw new Error(t('bg.noPrivateKeyImported'));
 
   let key: openpgp.PrivateKey;
   try {
     key = await openpgp.readPrivateKey({ armoredKey: armored });
   } catch {
-    throw new Error('Stored private key is corrupt. Re-import it in Settings.');
+    throw new Error(t('bg.storedKeyCorrupt'));
   }
   try {
     unlockedKey = await openpgp.decryptKey({ privateKey: key, passphrase });
   } catch {
-    throw new Error('Incorrect passphrase.');
+    throw new Error(t('bg.incorrectPassphrase'));
   }
 
   // Ensure a session JWT. Try the existing one with a cheap authenticated call;
@@ -541,7 +540,7 @@ async function logout(): Promise<StatusResult> {
 async function targetTabId(explicit?: number): Promise<number> {
   if (explicit != null) return explicit;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error('No active tab.');
+  if (!tab?.id) throw new Error(t('bg.noActiveTab'));
   return tab.id;
 }
 
@@ -592,11 +591,44 @@ async function fillActiveTab(id: string, tabId?: number): Promise<{ filled: bool
 /** Decrypt the resource's TOTP, compute the current code, and fill it on the page. */
 async function fillTotpActiveTab(id: string, tabId?: number): Promise<{ filled: boolean }> {
   const { item, secret } = await revealSecret(id);
-  if (!isValidTotp(secret.totp)) throw new Error('This item has no TOTP configured.');
+  if (!isValidTotp(secret.totp)) throw new Error(t('bg.noTotpConfigured'));
   const { code } = await generateTotp(secret.totp);
   const target = await targetTabId(tabId);
   const msg: ContentReq = { type: 'DO_FILL_TOTP', code };
   return { filled: await fillAcrossFrames(target, msg, hostOf(item.uri) || undefined) };
+}
+
+// ---------------------------------------------------------------------------
+// quickaccess launcher (in-page "browse all passwords")
+// ---------------------------------------------------------------------------
+/**
+ * Open the quickaccess popup. Prefer chrome.action.openPopup() (Chrome 127+),
+ * which shows the SAME popup UI anchored to the toolbar icon; it needs a user
+ * gesture and is not available everywhere, so on any failure fall back to the
+ * existing DETACHED quickaccess window (still the popup UI, not a full-page
+ * tab). The originating tab id is carried so the small window can target the
+ * page it was opened from.
+ */
+async function openQuickaccess(): Promise<{ ok: true }> {
+  if (typeof chrome.action?.openPopup === 'function') {
+    try {
+      await chrome.action.openPopup();
+      return { ok: true };
+    } catch { /* needs a gesture / unsupported — fall through to the window */ }
+  }
+  let tabId: number | undefined;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    tabId = tab?.id;
+  } catch { /* no active tab discoverable — open without a target */ }
+  const qs = tabId != null ? `?detached=1&tabId=${tabId}` : '?detached=1';
+  await chrome.windows.create({
+    url: chrome.runtime.getURL('popup.html' + qs),
+    type: 'popup',
+    width: 380,
+    height: 600,
+  });
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +659,7 @@ async function copyToClipboard(text: string, clearAfterMs: number): Promise<void
 // ---------------------------------------------------------------------------
 function senderTabId(sender: chrome.runtime.MessageSender): number {
   const id = sender.tab?.id;
-  if (id == null) throw new Error('This action requires a tab context.');
+  if (id == null) throw new Error(t('bg.requiresTabContext'));
   return id;
 }
 
@@ -647,6 +679,8 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
       return currentStatus();
     case 'LOGOUT':
       return logout();
+    case 'OPEN_QUICKACCESS':
+      return openQuickaccess();
     case 'LIST':
       return { items: await listResources(req.force) };
     case 'REVEAL':
@@ -673,7 +707,7 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
     case 'DISCARD_SAVE':
       return discardSave(senderTabId(sender));
     default:
-      throw new Error(`Unknown request: ${(req as { type: string }).type}`);
+      throw new Error(t('bg.unknownRequest', { type: (req as { type: string }).type }));
   }
 }
 

@@ -14,9 +14,21 @@ export default defineManifest({
   version: '0.1.0',
   description:
     'Aegis-styled, Passbolt-compatible E2EE password manager. Keys and crypto run in the isolated background service worker.',
+  icons: {
+    16: 'src/icons/icon-16.png',
+    32: 'src/icons/icon-32.png',
+    48: 'src/icons/icon-48.png',
+    128: 'src/icons/icon-128.png',
+  },
   action: {
     default_popup: 'popup.html',
     default_title: 'JPassbolt',
+    default_icon: {
+      16: 'src/icons/icon-16.png',
+      32: 'src/icons/icon-32.png',
+      48: 'src/icons/icon-48.png',
+      128: 'src/icons/icon-128.png',
+    },
   },
   options_page: 'options.html',
   background: {
