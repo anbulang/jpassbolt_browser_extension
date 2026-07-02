@@ -11,7 +11,7 @@
  * JPassbolt server origin (never act on our own app), and history/MutationObserver
  * hooks because tabs.onUpdated never fires on SPA route changes.
  */
-import { rpc, type ContentReq, type ContentResult } from '../shared/messages';
+import { rpc, type BridgeSessionSnapshot, type ContentReq, type ContentResult, type SessionChangedMsg } from '../shared/messages';
 import { fill, fillTotp, passwordFields, ctaAnchor, captureCredentials } from './dom';
 import { InForm } from './inform';
 
@@ -166,6 +166,53 @@ function init(): void {
         );
       }
     } catch { /* nothing staged */ }
+  }
+
+  // --- SPA session-state bridge (extension -> web app, ONE-WAY) ------------
+  // Activates ONLY when this top frame IS the user-configured web-app origin
+  // (chrome.storage.local 'app_origin'; unset = bridge off). This gate is
+  // deliberately independent of `excludedHere` above: on the app origin the
+  // bridge is ON while autofill/CTA/autosave stay OFF per the exclusion gate.
+  // SECURITY (see shared/messages.ts): only { state, username } may ever cross
+  // window.postMessage here — never keys, passphrases, JWTs or secrets.
+  if (TOP) {
+    void (async () => {
+      let appOrigin: string | null = null;
+      try {
+        const raw = (await chrome.storage.local.get('app_origin')).app_origin as string | undefined;
+        if (raw?.trim()) appOrigin = new URL(raw.trim()).origin;
+      } catch { /* unset or invalid -> bridge stays off */ }
+      if (!appOrigin || location.origin !== appOrigin) return;
+      const origin = appOrigin;
+
+      const post = (snap: BridgeSessionSnapshot): void => {
+        window.postMessage(
+          { source: 'jpassbolt-ext', type: 'SESSION_CHANGED', state: snap.state, username: snap.username },
+          origin,
+        );
+      };
+
+      // (a) background broadcast on unlock/lock/logout -> relay into the page.
+      chrome.runtime.onMessage.addListener((msg: SessionChangedMsg | ContentReq) => {
+        if (msg?.type === 'SESSION_CHANGED') post({ state: msg.state, username: msg.username });
+      });
+
+      // (b) page query -> forward to the background, relay the snapshot back.
+      // Same-window, same-origin, and an explicit SPA source marker required.
+      window.addEventListener('message', (event: MessageEvent) => {
+        if (event.source !== window || event.origin !== origin) return;
+        const data = event.data as { source?: unknown; type?: unknown } | null;
+        if (!data || data.source !== 'jpassbolt-spa' || data.type !== 'GET_SESSION_STATE') return;
+        void rpc({ type: 'BRIDGE_GET_SESSION_STATE' }).then(post).catch(() => undefined);
+      });
+
+      // (c) initial snapshot on attach. Content scripts inject at
+      // document_idle, so the page may have posted GET_SESSION_STATE before
+      // the listener above existed and given up; push the current state once
+      // to close that handshake race (subscribers pick it up like any
+      // SESSION_CHANGED broadcast).
+      void rpc({ type: 'BRIDGE_GET_SESSION_STATE' }).then(post).catch(() => undefined);
+    })();
   }
 
   // --- SPA navigation + dynamic forms (⑦) ---------------------------------

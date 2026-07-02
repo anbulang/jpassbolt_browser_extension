@@ -20,12 +20,15 @@
 import * as openpgp from 'openpgp';
 import type {
   AccountInfo,
+  BridgeSessionSnapshot,
+  BridgeSessionState,
   ContentReq,
   ContentResult,
   CreateResourceInput,
   Req,
   RpcResult,
   SecretFields,
+  SessionChangedMsg,
   StatusResult,
   VaultItem,
 } from '../shared/messages';
@@ -43,6 +46,7 @@ const K = {
   jwt: 'jwt',
   user: 'user',
   account: 'account',
+  appOrigin: 'app_origin',
 } as const;
 
 async function get<T>(key: string): Promise<T | undefined> {
@@ -84,6 +88,8 @@ function lock(): void {
   resourceTypeCache = null; // drop the type catalogue too (account/server may change)
   pendingSaves.clear(); // never retain captured plaintext past a lock
   chrome.alarms.clear(LOCK_ALARM);
+  // Covers every lock path (manual, idle alarm, 401 expiry, logout's teardown).
+  void broadcastSessionState();
 }
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === LOCK_ALARM) lock();
@@ -520,13 +526,89 @@ async function unlock(passphrase: string): Promise<StatusResult> {
   const account = buildAccount(serverUrl, me, unlockedKey.getFingerprint());
   await set({ [K.user]: me, [K.account]: account });
   armLock();
+  void broadcastSessionState();
   return currentStatus();
 }
 
 async function logout(): Promise<StatusResult> {
   lock();
   await del([K.privateKey, K.publicKey, K.jwt, K.user, K.account]);
+  void broadcastSessionState(); // now resolves to 'logged_out' (key removed)
   return currentStatus();
+}
+
+// ---------------------------------------------------------------------------
+// SPA session-state bridge (extension -> web app, one-way)
+// ---------------------------------------------------------------------------
+/**
+ * Current session state reduced to the bridge enum + username. This is the
+ * ENTIRE surface the bridge is allowed to expose (see messages.ts) — never
+ * return anything richer from here.
+ */
+async function bridgeSnapshot(): Promise<BridgeSessionSnapshot> {
+  const { phase, account } = await currentStatus();
+  const state: BridgeSessionState =
+    phase === 'unlocked' ? 'unlocked' : phase === 'locked' ? 'locked' : 'logged_out';
+  return account?.username ? { state, username: account.username } : { state };
+}
+
+/** The configured web-app origin, normalized; null (bridge off) when unset/invalid. */
+async function configuredAppOrigin(): Promise<string | null> {
+  const raw = (await get<string>(K.appOrigin))?.trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Broadcast the session state to every open tab of the configured web-app
+ * origin. Best-effort by design: tabs without a (loaded) content script make
+ * sendMessage reject, which is swallowed per tab. No-op while no app origin
+ * is configured.
+ */
+async function broadcastSessionState(): Promise<void> {
+  try {
+    const appOrigin = await configuredAppOrigin();
+    if (!appOrigin) return;
+    const msg: SessionChangedMsg = { type: 'SESSION_CHANGED', ...(await bridgeSnapshot()) };
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (tab.id == null || !tab.url) continue;
+      let origin: string;
+      try {
+        origin = new URL(tab.url).origin;
+      } catch {
+        continue;
+      }
+      if (origin !== appOrigin) continue;
+      void chrome.tabs.sendMessage(tab.id, msg).catch(() => undefined);
+    }
+  } catch {
+    /* bridge is best-effort — never let it break the state transition itself */
+  }
+}
+
+/**
+ * Answer a bridge query. Only content scripts running ON the configured app
+ * origin may ask — any other sender (including a tab whose URL we cannot
+ * prove) gets refused, so the session state + username never leak to pages
+ * the user did not explicitly nominate as the web app.
+ */
+async function bridgeSessionState(sender: chrome.runtime.MessageSender): Promise<BridgeSessionSnapshot> {
+  const appOrigin = await configuredAppOrigin();
+  let senderOrigin = '';
+  try {
+    senderOrigin = new URL(sender.tab?.url ?? sender.url ?? '').origin;
+  } catch {
+    /* unknown sender origin -> refuse below */
+  }
+  if (!appOrigin || senderOrigin !== appOrigin) {
+    throw new Error(t('bg.bridgeNotAllowed'));
+  }
+  return bridgeSnapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +788,8 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
       return commitSave(senderTabId(sender));
     case 'DISCARD_SAVE':
       return discardSave(senderTabId(sender));
+    case 'BRIDGE_GET_SESSION_STATE':
+      return bridgeSessionState(sender);
     default:
       throw new Error(t('bg.unknownRequest', { type: (req as { type: string }).type }));
   }

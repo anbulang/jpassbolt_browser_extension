@@ -52,6 +52,25 @@ export interface StatusResult {
   account: AccountInfo | null;
 }
 
+// ---- SPA session-state bridge (extension -> web app, ONE-WAY) --------------
+// HARD SECURITY RULE for everything that crosses the window.postMessage bridge
+// to the JPassbolt web app: the payload may ONLY ever be
+//   { state: 'unlocked' | 'locked' | 'logged_out', username?: string }.
+// NEVER add private keys, passphrases, JWTs, session tokens, decrypted secrets
+// or ANY other credential material to these messages — the receiving end is a
+// regular web page. State enum + username, nothing else, ever.
+export type BridgeSessionState = 'unlocked' | 'locked' | 'logged_out';
+
+export interface BridgeSessionSnapshot {
+  state: BridgeSessionState;
+  username?: string;
+}
+
+/** Background -> content broadcast on every unlock/lock/logout transition. */
+export interface SessionChangedMsg extends BridgeSessionSnapshot {
+  type: 'SESSION_CHANGED';
+}
+
 // ---- Requests: UI -> background ------------------------------------------
 export type Req =
   | { type: 'GET_STATUS' }
@@ -80,7 +99,10 @@ export type Req =
   | { type: 'STAGE_SAVE'; name: string; username: string; uri: string; password: string }
   | { type: 'GET_PENDING_SAVE' }
   | { type: 'COMMIT_SAVE' }
-  | { type: 'DISCARD_SAVE' };
+  | { type: 'DISCARD_SAVE' }
+  // Session-state query from the bridge content script on the configured web
+  // app origin. Response is a BridgeSessionSnapshot — see the hard rule above.
+  | { type: 'BRIDGE_GET_SESSION_STATE' };
 
 export interface RespMap {
   GET_STATUS: StatusResult;
@@ -103,6 +125,7 @@ export interface RespMap {
   GET_PENDING_SAVE: { pending: { name: string; username: string; uri: string } | null };
   COMMIT_SAVE: { item: VaultItem };
   DISCARD_SAVE: { ok: true };
+  BRIDGE_GET_SESSION_STATE: BridgeSessionSnapshot;
 }
 
 /** Wire envelope returned by the background for every request. */

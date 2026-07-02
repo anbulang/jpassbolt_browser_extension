@@ -4,7 +4,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { Copy, Dices, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Plus, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import { AppWindow, Copy, Dices, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Plus, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
 import { t } from '../shared/i18n';
 import { generateTotp, isValidTotp, type TotpConfig } from '../shared/totp';
@@ -89,8 +89,54 @@ export function ServerForm({ initial, onDone }: { initial?: string; onDone: (s: 
   );
 }
 
+/**
+ * Web-app origin for the SPA session-state bridge (chrome.storage.local
+ * 'app_origin'). Empty = bridge disabled. Only the state enum + username ever
+ * cross the bridge — see shared/messages.ts for the hard rule.
+ */
+export function AppOriginForm({ onSaved }: { onSaved: () => void }) {
+  const [origin, setOrigin] = useState('');
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    void chrome.storage.local.get('app_origin').then((v) => {
+      const stored = v.app_origin as string | undefined;
+      if (stored) setOrigin(stored);
+    });
+  }, []);
+  const submit = async () => {
+    setErr(null); setBusy(true);
+    try {
+      const raw = origin.trim();
+      if (!raw) {
+        await chrome.storage.local.remove('app_origin');
+      } else {
+        let normalized: string;
+        try { normalized = new URL(raw).origin; } catch { throw new Error(t('appOrigin.invalid')); }
+        await chrome.storage.local.set({ app_origin: normalized });
+        setOrigin(normalized);
+      }
+      onSaved();
+    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="jpb-card">
+      <div className="jpb-h2"><AppWindow size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('appOrigin.title')}</div>
+      <p className="jpb-muted">{t('appOrigin.intro')}</p>
+      <div className="jpb-field" style={{ marginTop: 12 }}>
+        <label className="jpb-label">{t('appOrigin.label')}</label>
+        <input className="jpb-input" value={origin} onChange={(e) => setOrigin(e.target.value)} placeholder={t('appOrigin.placeholder')} />
+      </div>
+      <ErrorMsg text={err} />
+      <Btn variant="primary" block onClick={submit} disabled={busy}>{busy ? t('server.saving') : t('common.continue')}</Btn>
+    </div>
+  );
+}
+
 export function KeyImportForm({ onDone }: { onDone: (s: StatusResult) => void }) {
   const [key, setKey] = useState('');
+  const [fileName, setFileName] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const submit = async () => {
@@ -99,16 +145,37 @@ export function KeyImportForm({ onDone }: { onDone: (s: StatusResult) => void })
     catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
-  const onFile = async (f: File | null) => { if (f) setKey(await f.text()); };
+  // Never echo the armored private key back into the UI: file contents go
+  // straight to state and only the file name is shown.
+  const onFile = async (f: File | null) => {
+    if (!f) return;
+    setKey(await f.text());
+    setFileName(f.name);
+  };
+  const clearFile = () => { setKey(''); setFileName(null); };
   return (
     <div className="jpb-card">
       <div className="jpb-h2"><KeyRound size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('key.title')}</div>
       <p className="jpb-muted">{t('key.intro')}</p>
-      <div className="jpb-field" style={{ marginTop: 12 }}>
-        <label className="jpb-label">{t('key.label')}</label>
-        <textarea className="jpb-textarea" value={key} onChange={(e) => setKey(e.target.value)} placeholder={t('key.placeholder')} />
-      </div>
-      <input type="file" accept=".asc,.txt,.key,.pgp" onChange={(e) => onFile(e.target.files?.[0] ?? null)} style={{ fontSize: 12, marginBottom: 12 }} />
+      {fileName ? (
+        <div className="jpb-field" style={{ marginTop: 12 }}>
+          <label className="jpb-label">{t('key.label')}</label>
+          <div className="jpb-keychip">
+            <KeyRound size={14} style={{ verticalAlign: '-2px', marginRight: 6 }} />
+            <span>{t('key.fileLoaded', { name: fileName })}</span>
+            <button type="button" className="jpb-link" style={{ marginLeft: 'auto' }} onClick={clearFile}>{t('key.clearFile')}</button>
+          </div>
+        </div>
+      ) : (
+        <div className="jpb-field" style={{ marginTop: 12 }}>
+          <label className="jpb-label">{t('key.label')}</label>
+          {/* jpb-masked renders the pasted key like a password field */}
+          <textarea className="jpb-textarea jpb-masked" value={key} onChange={(e) => setKey(e.target.value)} placeholder={t('key.placeholder')} />
+        </div>
+      )}
+      {fileName ? null : (
+        <input type="file" accept=".asc,.txt,.key,.pgp" onChange={(e) => onFile(e.target.files?.[0] ?? null)} style={{ fontSize: 12, marginBottom: 12 }} />
+      )}
       <ErrorMsg text={err} />
       <Btn variant="primary" block onClick={submit} disabled={busy || !key.trim()}>{busy ? t('key.importing') : t('key.import')}</Btn>
     </div>
@@ -258,11 +325,15 @@ export function TotpView({ cfg, onCopy, onFill }: {
 }
 
 // ---- strength labelling (shared by generator + create form) ---------------
+// Tiers mirror the official styleguide ENTROPY_THRESHOLDS (not_available 0 /
+// very-weak >=1 / weak >=60 / fair >=80 / strong >=112 / very-strong >=128).
 export function strengthFromEntropy(bits: number): { label: string; cls: string } {
-  if (bits < 60) return { label: t('strength.weak'), cls: 'weak' };
-  if (bits < 80) return { label: t('strength.fair'), cls: 'fair' };
-  if (bits < 120) return { label: t('strength.strong'), cls: 'strong' };
-  return { label: t('strength.excellent'), cls: 'excellent' };
+  if (bits >= 128) return { label: t('strength.veryStrong'), cls: 'very-strong' };
+  if (bits >= 112) return { label: t('strength.strong'), cls: 'strong' };
+  if (bits >= 80) return { label: t('strength.fair'), cls: 'fair' };
+  if (bits >= 60) return { label: t('strength.weak'), cls: 'weak' };
+  if (bits >= 1) return { label: t('strength.veryWeak'), cls: 'very-weak' };
+  return { label: t('strength.notAvailable'), cls: 'na' };
 }
 
 // ---- password / passphrase generator --------------------------------------

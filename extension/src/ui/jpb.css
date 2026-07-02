@@ -61,6 +61,13 @@
   transition: border-color .14s, box-shadow .14s;
 }
 .jpb-textarea:focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--surface); }
+/* Chrome-only (this is a Chrome extension): render sensitive text as dots. */
+.jpb-masked { -webkit-text-security: disc; }
+.jpb-keychip {
+  display: flex; align-items: center; box-sizing: border-box; width: 100%;
+  border: 1px solid var(--border); border-radius: var(--r); padding: 11px 13px;
+  font-size: 12px; color: var(--text); background: var(--surface-2);
+}
 
 /* buttons = aegis .btn / .btn.primary / .btn.sm */
 .jpb-btn {
@@ -130,8 +137,10 @@
 
 /* strength chip (password generator) + TOTP countdown */
 .jpb-strength { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; }
+.jpb-strength.na { background: var(--surface-3); color: var(--text-3); }
+.jpb-strength.very-weak { background: var(--red-soft); color: var(--red-text); }
 .jpb-strength.weak { background: var(--red-soft); color: var(--red-text); }
 .jpb-strength.fair { background: var(--amber-soft); color: var(--amber-text); }
 .jpb-strength.strong { background: var(--green-soft); color: var(--green-text); }
-.jpb-strength.excellent { background: var(--accent-soft); color: var(--accent-text); }
+.jpb-strength.very-strong { background: var(--accent-soft); color: var(--accent-text); }
 .jpb-totp-clock { font-family: var(--mono); font-size: 12px; color: var(--text-3); min-width: 34px; text-align: right; }

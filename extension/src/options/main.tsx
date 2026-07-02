@@ -5,7 +5,7 @@ import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import {
-  Btn, ErrorMsg, Header, KeyImportForm, PasswordGenerator, ServerForm, Spinner, useStatus,
+  AppOriginForm, Btn, ErrorMsg, Header, KeyImportForm, PasswordGenerator, ServerForm, Spinner, useStatus,
 } from '../ui/components';
 import { rpc, type StatusResult } from '../shared/messages';
 import { getLocale, setLocale, t, type Locale } from '../shared/i18n';
@@ -47,6 +47,8 @@ function Options() {
         </div>
 
         <ServerForm initial={status.serverUrl} onDone={(s) => apply(s, t('options.flash.serverSaved'))} />
+
+        <AppOriginForm onSaved={() => { setFlash(t('options.flash.appOriginSaved')); setTimeout(() => setFlash(null), 2000); }} />
 
         <KeyImportForm onDone={(s) => apply(s, t('options.flash.keyImported'))} />
 

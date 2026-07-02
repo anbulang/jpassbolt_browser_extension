@@ -112,12 +112,21 @@ const en: Dict = {
   'server.placeholder': 'https://passbolt.example.com',
   'server.saving': 'Saving…',
 
+  // web-app origin (SPA session-state bridge)
+  'appOrigin.title': 'Web application address',
+  'appOrigin.intro': 'Origin of the JPassbolt web app that may receive session-state notifications (unlocked / locked / signed out — never keys or secrets). Leave empty to disable the bridge.',
+  'appOrigin.label': 'Web app origin',
+  'appOrigin.placeholder': 'https://app.example.com',
+  'appOrigin.invalid': 'Enter a valid URL (e.g. https://app.example.com).',
+
   // key import form
   'key.title': 'Import your private key',
   'key.intro':
     'Paste your passphrase-protected OpenPGP private key. It is stored only in the extension and never leaves your browser.',
   'key.label': 'Armored private key',
   'key.placeholder': '-----BEGIN PGP PRIVATE KEY BLOCK-----',
+  'key.fileLoaded': 'Key file loaded: {name}',
+  'key.clearFile': 'Remove',
   'key.importing': 'Importing…',
   'key.import': 'Import key',
 
@@ -183,11 +192,13 @@ const en: Dict = {
   'totp.copyCode': 'Copy code',
   'totp.fillCodeOnPage': 'Fill code on page',
 
-  // password strength
+  // password strength (official six tiers)
+  'strength.notAvailable': 'N/A',
+  'strength.veryWeak': 'Very weak',
   'strength.weak': 'Weak',
   'strength.fair': 'Fair',
   'strength.strong': 'Strong',
-  'strength.excellent': 'Excellent',
+  'strength.veryStrong': 'Very strong',
 
   // password generator
   'gen.title': 'Password generator',
@@ -238,6 +249,7 @@ const en: Dict = {
   'options.flash.vaultLocked': 'Vault locked.',
   'options.flash.accountRemoved': 'Account removed from this browser.',
   'options.flash.serverSaved': 'Server saved.',
+  'options.flash.appOriginSaved': 'Web app address saved.',
   'options.flash.keyImported': 'Key imported.',
   'options.flash.languageChanged': 'Language updated.',
 
@@ -286,6 +298,7 @@ const en: Dict = {
   'bg.requiresTabContext': 'This action requires a tab context.',
   'bg.unknownRequest': 'Unknown request: {{type}}',
   'bg.requestFailed': 'Request failed ({{status}}).',
+  'bg.bridgeNotAllowed': 'Session-state bridge is not enabled for this origin.',
 };
 
 const zh: Dict = {
@@ -314,12 +327,21 @@ const zh: Dict = {
   'server.placeholder': 'https://passbolt.example.com',
   'server.saving': '正在保存…',
 
+  // web-app origin (SPA session-state bridge)
+  'appOrigin.title': 'Web 应用地址',
+  'appOrigin.intro': '允许接收会话状态通知（已解锁 / 已锁定 / 已退出——绝不包含密钥或机密）的 JPassbolt 网页应用来源。留空则关闭该桥。',
+  'appOrigin.label': 'Web 应用来源',
+  'appOrigin.placeholder': 'https://app.example.com',
+  'appOrigin.invalid': '请输入有效的 URL（如 https://app.example.com）。',
+
   // key import form
   'key.title': '导入你的私钥',
   'key.intro':
     '粘贴受口令保护的 OpenPGP 私钥。它仅保存在扩展内部，绝不会离开你的浏览器。',
   'key.label': '装甲格式私钥',
   'key.placeholder': '-----BEGIN PGP PRIVATE KEY BLOCK-----',
+  'key.fileLoaded': '已加载密钥文件：{name}',
+  'key.clearFile': '移除',
   'key.importing': '正在导入…',
   'key.import': '导入私钥',
 
@@ -385,10 +407,12 @@ const zh: Dict = {
   'totp.fillCodeOnPage': '在页面填充验证码',
 
   // password strength
+  'strength.notAvailable': '不适用',
+  'strength.veryWeak': '非常弱',
   'strength.weak': '弱',
   'strength.fair': '一般',
   'strength.strong': '强',
-  'strength.excellent': '极强',
+  'strength.veryStrong': '非常强',
 
   // password generator
   'gen.title': '密码生成器',
@@ -439,6 +463,7 @@ const zh: Dict = {
   'options.flash.vaultLocked': '密码库已锁定。',
   'options.flash.accountRemoved': '已从此浏览器移除账户。',
   'options.flash.serverSaved': '服务器已保存。',
+  'options.flash.appOriginSaved': 'Web 应用地址已保存。',
   'options.flash.keyImported': '私钥已导入。',
   'options.flash.languageChanged': '语言已更新。',
 
@@ -484,6 +509,7 @@ const zh: Dict = {
   'bg.requiresTabContext': '此操作需要标签页上下文。',
   'bg.unknownRequest': '未知请求：{{type}}',
   'bg.requestFailed': '请求失败（{{status}}）。',
+  'bg.bridgeNotAllowed': '会话状态桥未对该来源启用。',
 };
 
 const DICTS: Record<Locale, Dict> = { zh, en };
