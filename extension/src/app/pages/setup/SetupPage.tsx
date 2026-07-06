@@ -390,7 +390,10 @@ export default function SetupPage() {
                     </span>
                   </div>
                   <textarea
-                    className="flow-textarea"
+                    // jpb-masked (-webkit-text-security: disc) hides the pasted
+                    // armored private key like a password field — same shoulder-
+                    // surfing defence KeyImportForm uses (commit dd4a481).
+                    className="flow-textarea jpb-masked"
                     placeholder={t('app.auth.setup.key.keyPlaceholder')}
                     value={importArmored}
                     onChange={(e) => setImportArmored(e.target.value)}

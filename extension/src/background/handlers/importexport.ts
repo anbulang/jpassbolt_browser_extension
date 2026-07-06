@@ -28,7 +28,7 @@ import { t } from '../../shared/i18n';
 import { apiCall } from '../http';
 import { decryptMessage, encryptForSelf } from '../crypto';
 import { decryptResourceMetadata } from '../metadataKey';
-import { armLock, getUnlockedKey, invalidateResourceCache, registerLockHook } from '../state';
+import { armLock, getUnlockedKey, invalidateResourceCache, registerLockHook, registerSessionResetHook } from '../state';
 import { buildCsv, parseCsv, type ImportEntry } from '../importexport/csv';
 import { buildKdbx, parseKdbx } from '../importexport/kdbx';
 
@@ -48,7 +48,13 @@ interface StagedImport {
 }
 
 const staging = new Map<string, StagedImport>();
+// Wipe the plaintext staging area on BOTH lock and session-reset: the account
+// identity can change on UNLOCK without a lock() in between (IMPORT_KEY /
+// recovery), and staged plaintext captured under the previous account must
+// never be committable into the new account's vault. Mirrors pendingSaves
+// (index.ts) and metadataKey — both register both hooks.
 registerLockHook(() => staging.clear());
+registerSessionResetHook(() => staging.clear());
 
 function sweepExpired(): void {
   const now = Date.now();
@@ -143,18 +149,39 @@ function isEncryptedDescriptionSlug(slug: string | undefined): boolean {
  * resources store JSON regardless) and falls back to raw-password handling —
  * same tolerance as the SPA's decodeSecret, so exports decode identically.
  */
+/**
+ * Build an otpauth:// URI from a decrypted TOTP secret object, the wire form
+ * both CSV (`totp` column) and KDBX (`otp` field) carry. Without this the seed
+ * is silently dropped from an export and the backup loses 2FA.
+ */
+function totpConfigToUri(totp: Record<string, unknown>, label: string): string | undefined {
+  const secret = typeof totp.secret_key === 'string' ? totp.secret_key.trim() : '';
+  if (!secret) return undefined;
+  const params = new URLSearchParams({ secret });
+  if (typeof totp.algorithm === 'string' && totp.algorithm) params.set('algorithm', totp.algorithm);
+  if (typeof totp.digits === 'number') params.set('digits', String(totp.digits));
+  if (typeof totp.period === 'number') params.set('period', String(totp.period));
+  return `otpauth://totp/${encodeURIComponent(label || 'JPassbolt')}?${params.toString()}`;
+}
+
 function decodeSecret(
   slug: string | undefined,
   plaintext: string,
-): { password: string; description: string } {
+  label = '',
+): { password: string; description: string; totp?: string } {
   const trimmed = plaintext.trim();
   if (isEncryptedDescriptionSlug(slug) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
     try {
-      const parsed = JSON.parse(trimmed) as { password?: unknown; description?: unknown };
+      const parsed = JSON.parse(trimmed) as { password?: unknown; description?: unknown; totp?: unknown };
       if (parsed && typeof parsed === 'object' && 'password' in parsed) {
         return {
           password: typeof parsed.password === 'string' ? parsed.password : '',
           description: typeof parsed.description === 'string' ? parsed.description : '',
+          // password-description-totp / v5-*-with-totp keep the seed inside the
+          // secret JSON — carry it into the export instead of dropping it.
+          totp: parsed.totp && typeof parsed.totp === 'object'
+            ? totpConfigToUri(parsed.totp as Record<string, unknown>, label)
+            : undefined,
         };
       }
     } catch {
@@ -374,7 +401,7 @@ async function exportBuild(req: Req<'EXPORT_BUILD'>): Promise<ImportExportRespMa
       displayName = fields.name || displayName;
       const sec = await apiCall<{ data: string }>('GET', `/secrets/resource/${r.id}.json`);
       const plaintext = await decryptMessage(sec.data);
-      const content = decodeSecret(slugById[r.resource_type_id ?? ''], plaintext);
+      const content = decodeSecret(slugById[r.resource_type_id ?? ''], plaintext, fields.name);
       entries.push({
         name: fields.name,
         username: fields.username,
@@ -383,6 +410,9 @@ async function exportBuild(req: Req<'EXPORT_BUILD'>): Promise<ImportExportRespMa
         // password-and-description keeps the description inside the secret; the
         // string types keep it in the cleartext column. Prefer whichever is set.
         description: content.description || fields.description || '',
+        // Carry the TOTP seed (otpauth URI) so a 2FA-bearing resource keeps its
+        // second factor in the exported CSV/KDBX.
+        totp: content.totp,
       });
     } catch (err) {
       // No READ secret / undecryptable metadata / transient fetch failure: skip
