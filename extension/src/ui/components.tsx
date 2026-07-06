@@ -2,9 +2,10 @@ import {
   useCallback,
   useEffect,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import { AppWindow, Copy, Dices, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Plus, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import { Copy, Dices, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Plus, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
 import { t } from '../shared/i18n';
 import { generateTotp, isValidTotp, type TotpConfig } from '../shared/totp';
@@ -14,11 +15,12 @@ import {
   passphraseEntropyBits, passwordEntropyBits, passwordPoolSize,
   type PassphraseOptions, type PasswordOptions,
 } from '../shared/passgen';
+import MfaChallenge from '../app/components/MfaChallenge';
 
 // ---- primitives -----------------------------------------------------------
 export function Btn(props: {
   children: ReactNode;
-  onClick?: () => void;
+  onClick?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
   type?: 'button' | 'submit';
   variant?: 'primary' | 'default' | 'ghost';
   block?: boolean;
@@ -82,51 +84,6 @@ export function ServerForm({ initial, onDone }: { initial?: string; onDone: (s: 
       <div className="jpb-field" style={{ marginTop: 12 }}>
         <label className="jpb-label">{t('server.label')}</label>
         <input className="jpb-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder={t('server.placeholder')} />
-      </div>
-      <ErrorMsg text={err} />
-      <Btn variant="primary" block onClick={submit} disabled={busy}>{busy ? t('server.saving') : t('common.continue')}</Btn>
-    </div>
-  );
-}
-
-/**
- * Web-app origin for the SPA session-state bridge (chrome.storage.local
- * 'app_origin'). Empty = bridge disabled. Only the state enum + username ever
- * cross the bridge — see shared/messages.ts for the hard rule.
- */
-export function AppOriginForm({ onSaved }: { onSaved: () => void }) {
-  const [origin, setOrigin] = useState('');
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    void chrome.storage.local.get('app_origin').then((v) => {
-      const stored = v.app_origin as string | undefined;
-      if (stored) setOrigin(stored);
-    });
-  }, []);
-  const submit = async () => {
-    setErr(null); setBusy(true);
-    try {
-      const raw = origin.trim();
-      if (!raw) {
-        await chrome.storage.local.remove('app_origin');
-      } else {
-        let normalized: string;
-        try { normalized = new URL(raw).origin; } catch { throw new Error(t('appOrigin.invalid')); }
-        await chrome.storage.local.set({ app_origin: normalized });
-        setOrigin(normalized);
-      }
-      onSaved();
-    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
-  };
-  return (
-    <div className="jpb-card">
-      <div className="jpb-h2"><AppWindow size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('appOrigin.title')}</div>
-      <p className="jpb-muted">{t('appOrigin.intro')}</p>
-      <div className="jpb-field" style={{ marginTop: 12 }}>
-        <label className="jpb-label">{t('appOrigin.label')}</label>
-        <input className="jpb-input" value={origin} onChange={(e) => setOrigin(e.target.value)} placeholder={t('appOrigin.placeholder')} />
       </div>
       <ErrorMsg text={err} />
       <Btn variant="primary" block onClick={submit} disabled={busy}>{busy ? t('server.saving') : t('common.continue')}</Btn>
@@ -225,6 +182,18 @@ export function Flow({ status, onChange, children }: {
 }) {
   const logout = async () => onChange(await rpc({ type: 'LOGOUT' }));
   if (!status) return <Spinner label={t('flow.loading')} />;
+  // Login-time MFA gate: UNLOCK (or GET_STATUS while a challenge is parked in
+  // the worker) reports phase:'locked' + mfa.required — the session's pending
+  // JWT lives only in background memory until MFA_VERIFY succeeds. Cancelling
+  // sends LOCK, which wipes the parked challenge and falls back to UnlockForm.
+  if (status.mfa?.required) {
+    return (
+      <MfaChallenge
+        onDone={onChange}
+        onCancel={async () => onChange(await rpc({ type: 'LOCK' }))}
+      />
+    );
+  }
   switch (status.phase) {
     case 'no_server':
       return <ServerForm onDone={onChange} />;

@@ -17,8 +17,20 @@ const PARAMS = new URLSearchParams(location.search);
 const DETACHED = PARAMS.get('detached') === '1';
 const DETACHED_TAB_ID = PARAMS.get('tabId') ? Number(PARAMS.get('tabId')) : null;
 
-function openVault() {
-  chrome.tabs.create({ url: chrome.runtime.getURL('app.html') });
+/**
+ * Official-parity vault entry: the vault lives at the server's /app URL, where
+ * the content script swaps in the extension-hosted app iframe (appBootstrap).
+ * Falls back to the raw extension page while no server is configured yet.
+ */
+async function openVault() {
+  try {
+    const s = await rpc({ type: 'GET_STATUS' });
+    if (s.serverUrl) {
+      await chrome.tabs.create({ url: s.serverUrl.replace(/\/+$/, '') + '/app' });
+      return;
+    }
+  } catch { /* fall through to the extension page */ }
+  await chrome.tabs.create({ url: chrome.runtime.getURL('app.html') });
 }
 
 /** The content page tab this quickaccess acts on (the detached tab, else active). */
@@ -106,9 +118,11 @@ function Quickaccess() {
         <div className="jpb-row-name">{i.name}</div>
         <div className="jpb-row-sub">{i.username || i.uri || t('common.dash')}</div>
       </div>
-      <div className="jpb-row-actions">
-        <Btn small variant="ghost" title={t('vault.copyPassword')} onClick={() => copy(i.id)}><Copy size={14} /></Btn>
-        <Btn small variant="ghost" title={t('vault.fillLogin')} onClick={() => fill(i.id)}><LogIn size={14} /></Btn>
+      {/* Stop propagation so the action buttons don't also trigger the row's
+          fill-and-close click handler (double FILL / interrupted copy). */}
+      <div className="jpb-row-actions" onClick={(e) => e.stopPropagation()}>
+        <Btn small variant="ghost" title={t('vault.copyPassword')} onClick={(e) => { e.stopPropagation(); void copy(i.id); }}><Copy size={14} /></Btn>
+        <Btn small variant="ghost" title={t('vault.fillLogin')} onClick={(e) => { e.stopPropagation(); void fill(i.id); }}><LogIn size={14} /></Btn>
       </div>
     </div>
   );
@@ -149,7 +163,7 @@ function Quickaccess() {
 
       <div style={{ display: 'flex', gap: 8 }}>
         <Btn block variant="primary" onClick={startCreate}><Plus size={14} /> {t('common.new')}</Btn>
-        <Btn block onClick={openVault}><KeyRound size={14} /> {t('vault.openVault')}</Btn>
+        <Btn block onClick={() => void openVault()}><KeyRound size={14} /> {t('vault.openVault')}</Btn>
         <Btn block variant="ghost" onClick={() => reload(true)}>{t('common.refresh')}</Btn>
       </div>
     </>

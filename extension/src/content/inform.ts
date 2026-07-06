@@ -44,6 +44,7 @@ const STYLE = `
 .sep { height: 1px; background: #f0f0f3; }
 .empty { padding: 12px; font-size: 12px; color: #9ca3af; text-align: center; }
 .action { color: #3b4fd1; font-weight: 500; font-size: 13px; }
+.menu-err { padding: 9px 12px; font-size: 12px; color: #c92a2a; line-height: 1.4; border-top: 1px solid #f0f0f3; background: #fff5f5; }
 /* autosave banner */
 .banner { position: fixed; top: 16px; right: 16px; z-index: 2147483647; width: 320px;
   background: #fff; color: #1f2937; border: 1px solid #e5e7eb; border-radius: 12px;
@@ -233,9 +234,44 @@ export class InForm {
     try {
       const { item, secret } = await rpc({ type: 'REVEAL', id });
       fill(item.username, secret.password);
-    } catch { /* locked or denied — leave the form untouched */ }
+    } catch (e) {
+      // Locked or denied — leave the form untouched, but never fail silently:
+      // keep the menu open and surface the reason (with an unlock path when
+      // the vault is locked) instead of a "clicked and nothing happened".
+      await this.showMenuError(e);
+      return;
+    }
     this.closeMenu();
     this.hideCta();
+  }
+
+  /**
+   * Render a REVEAL failure inside the open menu. When the vault turns out to
+   * be locked (idle lock or 401 teardown), the row doubles as guidance: an
+   * "Unlock" action pops the quickaccess so the user can re-enter the
+   * passphrase; other failures (deleted item, server error) show their reason.
+   */
+  private async showMenuError(e: unknown): Promise<void> {
+    if (!this.panel) return; // menu already dismissed — nowhere to report
+    let locked = false;
+    try {
+      locked = (await rpc({ type: 'GET_STATUS' })).phase !== 'unlocked';
+    } catch { /* status unavailable — fall back to the raw error message */ }
+    const panel = this.panel;
+    if (!panel) return; // dismissed while we awaited the status
+    panel.querySelector('.menu-err')?.remove();
+    panel.querySelector('.menu-unlock')?.remove();
+    const msg = locked
+      ? t('inform.unlockRequired')
+      : e instanceof Error ? e.message : String(e);
+    panel.appendChild(el('div', 'menu-err', msg));
+    if (locked) {
+      const unlock = el('button', 'row menu-unlock');
+      unlock.appendChild(el('div', 'action', `🔓  ${t('inform.unlock')}`));
+      unlock.addEventListener('click', () => { void rpc({ type: 'OPEN_QUICKACCESS' }); this.dismissMenu(); });
+      panel.appendChild(unlock);
+    }
+    this.place();
   }
 
   private generateIntoPage(): void {

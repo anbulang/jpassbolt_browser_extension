@@ -11,14 +11,19 @@
     "zip": "cd dist && zip -r -FS ../jpassbolt-extension.zip . && cd .."
   },
   "dependencies": {
+    "hash-wasm": "^4.12.0",
+    "kdbxweb": "^2.1.1",
     "lucide-react": "^0.577.0",
     "openpgp": "^6.3.0",
+    "papaparse": "^5.5.4",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^6.30.4"
   },
   "devDependencies": {
     "@crxjs/vite-plugin": "beta",
     "@types/chrome": "latest",
+    "@types/papaparse": "^5.5.2",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.3.4",

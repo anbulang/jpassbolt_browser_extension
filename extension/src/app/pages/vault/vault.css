@@ -1,0 +1,26 @@
+/* Vault-page additions on top of ui/aegis.css (which already carries the full
+   .vault/.folders/.reslist/.rescard/.panel/.field/.strength kit ported from the
+   SPA). Only the deltas the page needs live here. */
+
+/* Strength meter states the shared kit lacks: locked/empty ("n/a") greys the
+   bars out entirely; s0 keeps them unfilled. */
+.strength.na .bars i,
+.strength.s0 .bars i { background: var(--surface-3); }
+.strength.na { color: var(--text-3); }
+
+/* ResourceFormModal password field: inline meter + fold-out generator. */
+.pwfield-strength {
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+.pwfield-gen { margin-top: 10px; }
+/* The generator ships in popup styling (.jpb-card); flatten its chrome so it
+   reads as part of the dialog body instead of a nested card. */
+.pwfield-gen .jpb-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r, 10px);
+  background: var(--surface-2);
+  box-shadow: none;
+}

@@ -1,208 +1,169 @@
-import { StrictMode, useMemo, useState } from 'react';
+/**
+ * Full-page app entry: HashRouter + the existing Flow phase machine + AppLayout.
+ *
+ * Route table lives in app/routes.tsx (foundation-owned). Protected routes
+ * render inside <ProtectedShell> — the Flow onboarding/unlock machine until the
+ * vault is unlocked, then the Aegis rail shell (AppLayout) with the router
+ * Outlet. Guest routes (setup / recovery) bypass Flow entirely: no account
+ * exists yet.
+ *
+ * Deep links: content/appBootstrap.ts mounts this page as an iframe with
+ * `?pathname=<host tab path>`; primeInitialRoute() maps that server path onto
+ * the hash router before React mounts (official HandleApplicationFirstLoadRoute
+ * parity). An explicit #hash (in-app navigation state) always wins.
+ */
+import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Copy, Eye, EyeOff, LogIn, Plus, RefreshCw, Search, Settings, ShieldAlert } from 'lucide-react';
+import { HashRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
-import {
-  Btn, CreateResourceForm, ErrorMsg, Flow, Header, Spinner, TotpView, initials, useStatus, useVault,
-} from '../ui/components';
-import { rpc, type SecretFields, type StatusResult, type VaultItem } from '../shared/messages';
-import { t } from '../shared/i18n';
+import { SESSION_DESYNC_EVENT, rpc } from '../shared/messages';
+import { Flow, Header, useStatus } from '../ui/components';
+import { AppLayout } from './Layout';
+import { ToastProvider } from './lib/toast';
+import { guestRoutes, protectedRoutes } from './routes';
 
-/**
- * The web page the full-page app should act on. The app lives in its own
- * chrome-extension:// tab (where no content script runs), so "fill" must target
- * the most recently used http(s) tab, not the active tab (which is the app).
- */
-async function lastWebTab(): Promise<chrome.tabs.Tab | null> {
-  const tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] });
-  if (!tabs.length) return null;
-  return tabs.reduce((a, b) =>
-    (((b as { lastAccessed?: number }).lastAccessed ?? 0) > ((a as { lastAccessed?: number }).lastAccessed ?? 0) ? b : a));
+// ---- embed-origin gate ------------------------------------------------------
+// app.html is a web-accessible resource (the server-page pagemod embeds it),
+// so a web origin that learns its URL could iframe the real vault UI under a
+// transparent overlay and clickjack an unlocked session (e.g. steer one click
+// onto a Share confirm), or full-screen it for UI redressing. The manifest
+// cannot express the policy statically — `frame-ancestors 'self'` would also
+// block the legitimate server-origin mount, and the server URL is only known
+// at runtime — so it is enforced here, before anything renders: when framed,
+// EVERY ancestor frame must be the configured server origin (or the extension
+// itself). Anything else gets a refusal page instead of the app.
+// Returns the offending origin, or null when rendering is allowed.
+async function findForbiddenEmbedder(): Promise<string | null> {
+  // Top-level tab (popup "open app", direct open): nothing to check.
+  if (window.top === window.self) return null;
+  const ancestors = Array.from(window.location.ancestorOrigins ?? []);
+  // Framed but the ancestor chain cannot be attested — fail closed.
+  if (ancestors.length === 0) return 'unknown origin';
+  const allowed = new Set([new URL(chrome.runtime.getURL('')).origin]);
+  try {
+    const status = await rpc({ type: 'GET_STATUS' });
+    // The pagemod only ever mounts on the configured server origin
+    // (appBootstrap checks serverUrl before injecting), so that is the one
+    // web origin allowed to frame us. No serverUrl configured -> no
+    // legitimate embedder exists yet.
+    if (status.serverUrl) allowed.add(new URL(status.serverUrl).origin);
+  } catch {
+    // Background unreachable / malformed serverUrl: extension-only — fail closed.
+  }
+  return ancestors.find((origin) => !allowed.has(origin)) ?? null;
 }
 
-function Detail({ item }: { item: VaultItem }) {
-  const [secret, setSecret] = useState<SecretFields | null>(null);
-  const [show, setShow] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [flash, setFlash] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [pwned, setPwned] = useState<number | null>(null);
-  const [checking, setChecking] = useState(false);
-
-  const reveal = async () => {
-    setErr(null); setBusy(true);
-    try { setSecret((await rpc({ type: 'REVEAL', id: item.id })).secret); setShow(true); }
-    catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
-  };
-  const copy = async () => {
-    try {
-      const s = secret ?? (await rpc({ type: 'REVEAL', id: item.id })).secret;
-      setSecret(s);
-      await rpc({ type: 'COPY', text: s.password, temporary: true });
-      setFlash(t('detail.copied30s')); setTimeout(() => setFlash(null), 1800);
-    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-  };
-  const fill = async () => {
-    try {
-      const tab = await lastWebTab();
-      if (!tab?.id) { setErr(t('detail.noOpenPage')); return; }
-      const r = await rpc({ type: 'FILL', id: item.id, tabId: tab.id });
-      setFlash(r.filled ? t('detail.filledPage') : t('detail.noLoginFormPage'));
-      setTimeout(() => setFlash(null), 2200);
-    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-  };
-  const copyTotp = async (code: string) => {
-    try { await rpc({ type: 'COPY', text: code, temporary: true }); setFlash(t('detail.codeCopied30s')); setTimeout(() => setFlash(null), 1800); }
-    catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-  };
-  const fillTotpOnPage = async () => {
-    try {
-      const tab = await lastWebTab();
-      if (!tab?.id) { setErr(t('detail.noOpenPage')); return; }
-      const r = await rpc({ type: 'FILL_TOTP', id: item.id, tabId: tab.id });
-      setFlash(r.filled ? t('detail.filledCode') : t('detail.noCodeField'));
-      setTimeout(() => setFlash(null), 2200);
-    } catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-  };
-  const checkBreach = async () => {
-    if (!secret) return;
-    setChecking(true);
-    try { setPwned((await rpc({ type: 'PWNED', password: secret.password })).count); }
-    catch { setPwned(-1); }
-    finally { setChecking(false); }
-  };
-
+function EmbedRefusal({ origin }: { origin: string }) {
   return (
-    <div className="jpb-card jpb-secret">
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-        <div className="jpb-row-icon" style={{ width: 44, height: 44, fontSize: 18 }}>{initials(item.name)}</div>
-        <div style={{ minWidth: 0 }}>
-          <div className="jpb-h2" style={{ margin: 0 }}>{item.name}</div>
-          {item.uri ? <a className="jpb-link" href={item.uri.includes('://') ? item.uri : `https://${item.uri}`} target="_blank" rel="noreferrer">{item.uri}</a> : null}
-        </div>
-      </div>
-
-      <div className="jpb-field" style={{ margin: 0 }}>
-        <span className="jpb-label">{t('detail.username')}</span>
-        <div className="jpb-secret-val" style={{ fontFamily: 'var(--sans)' }}>{item.username || t('common.dash')}</div>
-      </div>
-
-      <div className="jpb-field" style={{ margin: 0 }}>
-        <span className="jpb-label">{t('detail.password')}</span>
-        {secret ? (
-          <div className="jpb-secret-val">{show ? secret.password : '••••••••••'}</div>
-        ) : (
-          <div className="jpb-secret-val" style={{ color: 'var(--text-muted)' }}>{t('detail.passwordLocked')}</div>
-        )}
-      </div>
-
-      {secret?.description ? (
-        <div className="jpb-field" style={{ margin: 0 }}>
-          <span className="jpb-label">{t('detail.description')}</span>
-          <div className="jpb-secret-val" style={{ fontFamily: 'var(--sans)' }}>{secret.description}</div>
-        </div>
-      ) : null}
-
-      {secret?.totp ? <TotpView cfg={secret.totp} onCopy={copyTotp} onFill={fillTotpOnPage} /> : null}
-
-      <ErrorMsg text={err} />
-      {flash ? <div className="jpb-ok">{flash}</div> : null}
-      {pwned !== null ? (
-        pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>{t('breach.unavailable')}</div>
-          : pwned === 0 ? <div className="jpb-ok">{t('breach.notFound')}</div>
-            : <div className="jpb-error">{t('breach.foundConsiderChanging', { count: pwned.toLocaleString() })}</div>
-      ) : null}
-
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        {!secret ? (
-          <Btn variant="primary" onClick={reveal} disabled={busy}><Eye size={14} /> {busy ? t('detail.decrypting') : t('detail.reveal')}</Btn>
-        ) : (
-          <Btn onClick={() => setShow((s) => !s)}>{show ? <><EyeOff size={14} /> {t('detail.hide')}</> : <><Eye size={14} /> {t('detail.show')}</>}</Btn>
-        )}
-        <Btn onClick={copy}><Copy size={14} /> {t('detail.copyPassword')}</Btn>
-        <Btn onClick={fill}><LogIn size={14} /> {t('detail.fillActiveTab')}</Btn>
-        {secret ? <Btn onClick={checkBreach} disabled={checking}><ShieldAlert size={14} /> {checking ? t('detail.checking') : t('detail.breachCheck')}</Btn> : null}
-      </div>
+    <div
+      style={{
+        minHeight: '100vh',
+        display: 'grid',
+        placeContent: 'center',
+        textAlign: 'center',
+        padding: '2rem',
+        background: '#0f1115',
+        color: '#e6e8ee',
+        fontFamily: 'system-ui, sans-serif',
+      }}
+    >
+      <h1 style={{ fontSize: '1.1rem', margin: '0 0 0.5rem' }}>JPassbolt</h1>
+      <p style={{ margin: 0 }}>
+        Refused to load: this page was embedded by an unauthorized origin ({origin}).
+      </p>
     </div>
   );
 }
 
-function Vault() {
-  const { items, err, reload } = useVault(true);
-  const [q, setQ] = useState('');
-  const [selected, setSelected] = useState<VaultItem | null>(null);
-  const [creating, setCreating] = useState(false);
-
-  const filtered = useMemo(() => {
-    const all = items ?? [];
-    const n = q.trim().toLowerCase();
-    return n ? all.filter((i) => [i.name, i.username, i.uri].some((f) => f.toLowerCase().includes(n))) : all;
-  }, [items, q]);
-
-  return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18, alignItems: 'start' }}>
-      <div className="jpb-card" style={{ padding: 12 }}>
-        <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
-          <div style={{ position: 'relative', flex: 1 }}>
-            <Search size={15} style={{ position: 'absolute', left: 10, top: 10, color: 'var(--text-muted)' }} />
-            <input className="jpb-search" style={{ paddingLeft: 32 }} placeholder={t('vault.searchShort')} value={q} onChange={(e) => setQ(e.target.value)} />
-          </div>
-          <Btn variant="primary" title={t('create.title')} onClick={() => { setCreating(true); setSelected(null); }}><Plus size={14} /> {t('common.new')}</Btn>
-          <Btn variant="ghost" title={t('common.refresh')} onClick={() => reload(true)}><RefreshCw size={14} /></Btn>
-        </div>
-        <ErrorMsg text={err} />
-        {!items ? <Spinner label={t('flow.loadingVault')} /> :
-          filtered.length === 0 ? <div className="jpb-empty">{t('vault.noneYet')}</div> :
-            <div className="jpb-list" style={{ maxHeight: '70vh' }}>
-              {filtered.map((i) => (
-                <div key={i.id} className="jpb-row" onClick={() => { setSelected(i); setCreating(false); }} style={selected?.id === i.id ? { background: 'var(--surface-2)', borderColor: 'var(--border)' } : undefined}>
-                  <div className="jpb-row-icon">{initials(i.name)}</div>
-                  <div className="jpb-row-main">
-                    <div className="jpb-row-name">{i.name}</div>
-                    <div className="jpb-row-sub">{i.username || i.uri || t('common.dash')}</div>
-                  </div>
-                </div>
-              ))}
-            </div>}
-      </div>
-      <div>
-        {creating ? (
-          <CreateResourceForm
-            onCreated={(item) => { setCreating(false); reload(true); setSelected(item); }}
-            onCancel={() => setCreating(false)}
-          />
-        ) : selected ? (
-          <Detail key={selected.id} item={selected} />
-        ) : (
-          <div className="jpb-card jpb-empty">{t('vault.selectHint')}</div>
-        )}
-      </div>
-    </div>
-  );
+// ---- host-path → hash-route mapping ----------------------------------------
+/** '/app/users' → '/users'; '/setup/recover/…' → '/recover/…'; '/' | '/app' → '/'. */
+function mapHostPathname(p: string): string {
+  if (p.startsWith('/setup/recover/')) return '/recover/' + p.slice('/setup/recover/'.length);
+  if (p.startsWith('/setup/install/')) return '/setup/' + p.slice('/setup/install/'.length);
+  if (p.startsWith('/setup/')) return p;
+  if (p === '/recover' || p.startsWith('/recover/')) return p;
+  if (p === '/app' || p === '/app/') return '/';
+  if (p.startsWith('/app/')) return p.slice('/app'.length);
+  return '/';
 }
 
-function App() {
-  const { status, setStatus } = useStatus();
-  const lock = async () => setStatus(await rpc({ type: 'LOCK' }));
+(function primeInitialRoute() {
+  const raw = new URLSearchParams(location.search).get('pathname');
+  if (!raw || !raw.startsWith('/')) return;
+  if (location.hash && location.hash !== '#' && location.hash !== '#/') return;
+  location.hash = '#' + mapHostPathname(raw);
+})();
+
+// ---- protected shell --------------------------------------------------------
+function ProtectedShell() {
+  const { status, setStatus, refresh } = useStatus();
+
+  // Fall back to the lock screen when the background locks the session behind
+  // our back (idle alarm, 401 dead-session teardown, action in another surface):
+  // state.ts broadcasts SESSION_CHANGED to extension pages on every transition,
+  // and background/index.ts re-broadcasts once on every MV3 worker cold start.
+  // Belt-and-braces: shared/messages.ts rpc() additionally fires a local
+  // SESSION_DESYNC_EVENT whenever any RPC returns a vault-locked error while
+  // this shell still renders the unlocked UI (e.g. the worker was torn down
+  // and its storage.session rehydrate failed) — refresh then, too, so the user
+  // lands on the unlock screen instead of a wall of error toasts.
+  useEffect(() => {
+    const onMsg = (msg: unknown) => {
+      if ((msg as { type?: string } | null)?.type === 'SESSION_CHANGED') void refresh();
+    };
+    const onDesync = () => void refresh();
+    chrome.runtime.onMessage.addListener(onMsg);
+    window.addEventListener(SESSION_DESYNC_EVENT, onDesync);
+    return () => {
+      chrome.runtime.onMessage.removeListener(onMsg);
+      window.removeEventListener(SESSION_DESYNC_EVENT, onDesync);
+    };
+  }, [refresh]);
+
+  if (status?.phase === 'unlocked') {
+    return <AppLayout status={status} onStatus={setStatus} />;
+  }
+  // Onboarding / locked: the centered card flow (server → key import → unlock).
   return (
     <div className="jpb-shell">
-      <Header
-        account={status?.account ?? null}
-        onLock={status?.phase === 'unlocked' ? lock : undefined}
-        right={<Btn small variant="ghost" title={t('header.settings')} onClick={() => chrome.runtime.openOptionsPage()}><Settings size={14} /></Btn>}
-      />
+      <Header account={status?.account ?? null} />
       <div className="jpb-body">
-        <Flow status={status} onChange={(s: StatusResult) => setStatus(s)}>
-          <Vault />
+        <Flow status={status} onChange={setStatus}>
+          {null}
         </Flow>
       </div>
     </div>
   );
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode><App /></StrictMode>,
-);
+function App() {
+  return (
+    <HashRouter>
+      <ToastProvider>
+        <Routes>
+          {guestRoutes.map(({ path, Component }) => (
+            <Route key={path} path={path} element={<Component />} />
+          ))}
+          <Route element={<ProtectedShell />}>
+            {protectedRoutes.map(({ path, Component }) => (
+              <Route key={path} path={path} element={<Component />} />
+            ))}
+          </Route>
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </ToastProvider>
+    </HashRouter>
+  );
+}
+
+const root = createRoot(document.getElementById('root')!);
+void findForbiddenEmbedder().then((forbidden) => {
+  if (forbidden) {
+    console.warn(`JPassbolt: refusing to render app.html inside disallowed embedder (${forbidden})`);
+    root.render(<StrictMode><EmbedRefusal origin={forbidden} /></StrictMode>);
+    return;
+  }
+  root.render(<StrictMode><App /></StrictMode>);
+});
