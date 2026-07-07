@@ -11,6 +11,7 @@
  * fields; the menu only ever shows non-secret names/usernames.
  */
 import { rpc, type VaultItem } from '../shared/messages';
+import { t } from '../shared/i18n';
 import { fill, setValue, passwordFields } from './dom';
 import { generatePassword, DEFAULT_PASSWORD_OPTIONS } from '../shared/passgen';
 
@@ -43,6 +44,7 @@ const STYLE = `
 .sep { height: 1px; background: #f0f0f3; }
 .empty { padding: 12px; font-size: 12px; color: #9ca3af; text-align: center; }
 .action { color: #3b4fd1; font-weight: 500; font-size: 13px; }
+.menu-err { padding: 9px 12px; font-size: 12px; color: #c92a2a; line-height: 1.4; border-top: 1px solid #f0f0f3; background: #fff5f5; }
 /* autosave banner */
 .banner { position: fixed; top: 16px; right: 16px; z-index: 2147483647; width: 320px;
   background: #fff; color: #1f2937; border: 1px solid #e5e7eb; border-radius: 12px;
@@ -172,18 +174,28 @@ export class InForm {
     let items: VaultItem[] = [];
     try { items = (await rpc({ type: 'FIND_FOR_URL', url: location.href })).items; } catch { /* show actions only */ }
 
+    // The anchored field decides the emphasis, mirroring Passbolt's InFormMenu:
+    // a password field (registration) leads with "generate password"; a login /
+    // username field leads with suggested credentials + "browse all passwords".
+    const onPassword = this.anchor?.type === 'password';
+
     const panel = el('div', 'panel');
-    panel.appendChild(el('div', 'menu-head', items.length ? 'Suggested logins' : 'JPassbolt'));
+    // Suggested-logins header carries a count when there are matches; otherwise
+    // fall back to the brand as the section title.
+    const head = items.length
+      ? t('inform.suggestedLoginsCount', { count: items.length })
+      : t('app.name');
+    panel.appendChild(el('div', 'menu-head', head));
 
     if (items.length === 0) {
-      panel.appendChild(el('div', 'empty', 'No saved logins for this site.'));
+      panel.appendChild(el('div', 'empty', t('inform.noSavedLogins')));
     } else {
       for (const it of items) {
         const row = el('button', 'row');
         const ic = el('div', 'ic', (it.name.trim()[0] || '?').toUpperCase());
         const m = el('div', 'm');
         m.appendChild(el('div', 'n', it.name));
-        m.appendChild(el('div', 's', it.username || hostOf(it.uri) || '—'));
+        m.appendChild(el('div', 's', it.username || hostOf(it.uri) || t('common.dash')));
         row.append(ic, m);
         row.addEventListener('click', () => void this.useCredential(it.id));
         panel.appendChild(row);
@@ -191,14 +203,21 @@ export class InForm {
     }
 
     panel.appendChild(el('div', 'sep'));
-    const gen = el('button', 'row');
-    gen.appendChild(el('div', 'action', '⚄  Generate password'));
-    gen.addEventListener('click', () => this.generateIntoPage());
-    panel.appendChild(gen);
 
+    // Generate-password is a password-field action only (signup): it would be
+    // noise on a plain login field.
+    if (onPassword) {
+      const gen = el('button', 'row');
+      gen.appendChild(el('div', 'action', `⚄  ${t('inform.generatePassword')}`));
+      gen.addEventListener('click', () => this.generateIntoPage());
+      panel.appendChild(gen);
+    }
+
+    // "Browse all passwords" -> pop the quickaccess popup (NEVER a new tab); the
+    // background opens the toolbar popup when it can, else a detached small window.
     const open = el('button', 'row');
-    open.appendChild(el('div', 'action', '↗  Open JPassbolt'));
-    open.addEventListener('click', () => { window.open(chrome.runtime.getURL('app.html'), '_blank'); this.dismissMenu(); });
+    open.appendChild(el('div', 'action', `↗  ${t('inform.browseAllPasswords')}`));
+    open.addEventListener('click', () => { void rpc({ type: 'OPEN_QUICKACCESS' }); this.dismissMenu(); });
     panel.appendChild(open);
 
     this.panel = panel;
@@ -215,9 +234,44 @@ export class InForm {
     try {
       const { item, secret } = await rpc({ type: 'REVEAL', id });
       fill(item.username, secret.password);
-    } catch { /* locked or denied — leave the form untouched */ }
+    } catch (e) {
+      // Locked or denied — leave the form untouched, but never fail silently:
+      // keep the menu open and surface the reason (with an unlock path when
+      // the vault is locked) instead of a "clicked and nothing happened".
+      await this.showMenuError(e);
+      return;
+    }
     this.closeMenu();
     this.hideCta();
+  }
+
+  /**
+   * Render a REVEAL failure inside the open menu. When the vault turns out to
+   * be locked (idle lock or 401 teardown), the row doubles as guidance: an
+   * "Unlock" action pops the quickaccess so the user can re-enter the
+   * passphrase; other failures (deleted item, server error) show their reason.
+   */
+  private async showMenuError(e: unknown): Promise<void> {
+    if (!this.panel) return; // menu already dismissed — nowhere to report
+    let locked = false;
+    try {
+      locked = (await rpc({ type: 'GET_STATUS' })).phase !== 'unlocked';
+    } catch { /* status unavailable — fall back to the raw error message */ }
+    const panel = this.panel;
+    if (!panel) return; // dismissed while we awaited the status
+    panel.querySelector('.menu-err')?.remove();
+    panel.querySelector('.menu-unlock')?.remove();
+    const msg = locked
+      ? t('inform.unlockRequired')
+      : e instanceof Error ? e.message : String(e);
+    panel.appendChild(el('div', 'menu-err', msg));
+    if (locked) {
+      const unlock = el('button', 'row menu-unlock');
+      unlock.appendChild(el('div', 'action', `🔓  ${t('inform.unlock')}`));
+      unlock.addEventListener('click', () => { void rpc({ type: 'OPEN_QUICKACCESS' }); this.dismissMenu(); });
+      panel.appendChild(unlock);
+    }
+    this.place();
   }
 
   private generateIntoPage(): void {
@@ -243,25 +297,25 @@ export class InForm {
   showBanner(p: { name: string; username: string; uri: string }, onSave: () => Promise<void>, onDismiss: () => void): void {
     this.hideBanner();
     const b = el('div', 'banner');
-    const t = el('div', 't');
-    t.append(el('span', 'logo', 'JP'), el('span', undefined, 'Save this password?'));
-    b.appendChild(t);
+    const head = el('div', 't');
+    head.append(el('span', 'logo', 'JP'), el('span', undefined, t('inform.saveThisPassword')));
+    b.appendChild(head);
     const who = p.username ? `${p.username} · ${hostOf(p.uri)}` : hostOf(p.uri);
     b.appendChild(el('div', 'd', who));
     const err = el('div', 'err');
     err.style.display = 'none';
     b.appendChild(err);
     const btns = el('div', 'btns');
-    const dismiss = el('button', 'btn', 'Not now');
-    const save = el('button', 'btn primary', 'Save');
+    const dismiss = el('button', 'btn', t('inform.notNow'));
+    const save = el('button', 'btn primary', t('inform.save'));
     dismiss.addEventListener('click', () => { this.hideBanner(); onDismiss(); });
     // Await the save; on failure keep the banner open (with the reason) so the
     // user can retry — the staged credential survives a failed create.
     save.addEventListener('click', () => {
-      save.disabled = true; dismiss.disabled = true; save.textContent = 'Saving…';
+      save.disabled = true; dismiss.disabled = true; save.textContent = t('inform.saving');
       err.style.display = 'none';
       onSave().then(() => this.hideBanner()).catch((e: unknown) => {
-        save.disabled = false; dismiss.disabled = false; save.textContent = 'Retry';
+        save.disabled = false; dismiss.disabled = false; save.textContent = t('inform.retry');
         err.textContent = e instanceof Error ? e.message : String(e);
         err.style.display = 'block';
       });

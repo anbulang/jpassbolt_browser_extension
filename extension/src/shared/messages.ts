@@ -5,6 +5,12 @@
 
 import type { TotpConfig } from './totp';
 export type { TotpConfig } from './totp';
+import { t } from './i18n';
+import type { VaultReq, VaultRespMap } from './rpc/vault';
+import type { ShareReq, ShareRespMap } from './rpc/share';
+import type { GroupsReq, GroupsRespMap } from './rpc/groups';
+import type { AuthReq, AuthRespMap } from './rpc/auth';
+import type { ImportExportReq, ImportExportRespMap } from './rpc/importexport';
 
 export type VaultPhase = 'no_server' | 'no_account' | 'locked' | 'unlocked';
 
@@ -49,16 +55,68 @@ export interface StatusResult {
   phase: VaultPhase;
   serverUrl: string;
   account: AccountInfo | null;
+  /**
+   * Present when the server demands an MFA step after UNLOCK: the session is NOT
+   * usable yet — the UI must run MFA_VERIFY before treating the vault as open.
+   * The pending JWT never leaves background memory.
+   */
+  mfa?: { required: true; providers: string[] };
+}
+
+// ---- authenticated API pass-through (UI -> background -> server) -----------
+// The app UI performs plain HTTP through the background so the JWT (and every
+// other credential) never reaches the iframe context.
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+/**
+ * Full Passbolt response envelope + HTTP status. Non-2xx responses are returned
+ * as-is (NOT thrown) so the UI can inspect header.message / body (e.g. the MFA
+ * 403 probe reads body.mfa_providers).
+ */
+export type ApiEnvelope = {
+  status: number;
+  header?: {
+    id?: string;
+    status?: string;
+    code?: number;
+    message?: string;
+    [k: string]: unknown;
+  } | null;
+  body?: unknown;
+};
+
+// ---- session-state broadcast (background -> server tabs + extension pages) -
+// Sent to content scripts on the configured SERVER domain so the app-takeover
+// bootstrap (content/appBootstrap.ts) can re-evaluate mounting the extension
+// iframe, and to extension pages (app iframe) so the shell can fall back to
+// the lock screen. HARD SECURITY RULE: the payload may ONLY ever be
+//   { state: 'unlocked' | 'locked' | 'logged_out', username?: string }.
+// NEVER add private keys, passphrases, JWTs, session tokens, decrypted secrets
+// or ANY other credential material — it is a wake-up signal, not a data feed.
+export type SessionState = 'unlocked' | 'locked' | 'logged_out';
+
+export interface SessionSnapshot {
+  state: SessionState;
+  username?: string;
+}
+
+/** Background -> content broadcast on every unlock/lock/logout transition. */
+export interface SessionChangedMsg extends SessionSnapshot {
+  type: 'SESSION_CHANGED';
 }
 
 // ---- Requests: UI -> background ------------------------------------------
-export type Req =
+export type CoreReq =
   | { type: 'GET_STATUS' }
   | { type: 'SET_SERVER'; serverUrl: string }
   | { type: 'IMPORT_KEY'; armoredPrivateKey: string }
   | { type: 'UNLOCK'; passphrase: string }
   | { type: 'LOCK' }
   | { type: 'LOGOUT' }
+  // Open the quickaccess popup (from the in-page menu). The background opens the
+  // real action popup when it can, else a detached quickaccess window — never a
+  // full-page tab.
+  | { type: 'OPEN_QUICKACCESS' }
   | { type: 'LIST'; force?: boolean }
   | { type: 'REVEAL'; id: string }
   | { type: 'FIND_FOR_URL'; url: string }
@@ -75,40 +133,87 @@ export type Req =
   | { type: 'STAGE_SAVE'; name: string; username: string; uri: string; password: string }
   | { type: 'GET_PENDING_SAVE' }
   | { type: 'COMMIT_SAVE' }
-  | { type: 'DISCARD_SAVE' };
+  | { type: 'DISCARD_SAVE' }
+  // Authenticated API pass-through. path must be server-relative ('/...', query
+  // included); guest:true sends the request without Authorization (setup flows).
+  | { type: 'API_CALL'; method: HttpMethod; path: string; body?: unknown; guest?: boolean };
 
-export interface RespMap {
+export interface CoreRespMap {
   GET_STATUS: StatusResult;
   SET_SERVER: StatusResult;
   IMPORT_KEY: StatusResult;
   UNLOCK: StatusResult;
   LOCK: StatusResult;
   LOGOUT: StatusResult;
+  OPEN_QUICKACCESS: { ok: true };
   LIST: { items: VaultItem[] };
   REVEAL: { item: VaultItem; secret: SecretFields };
   FIND_FOR_URL: { items: VaultItem[] };
   FILL: { filled: boolean };
   FILL_TOTP: { filled: boolean };
   PWNED: { count: number };
-  COPY: { ok: true };
+  // clearMs = effective auto-clear delay actually applied (user-configurable
+  // jpb_clipboard_clear_ms; 0 when temporary was false or the user disabled
+  // clearing), so UI toasts can state the real burn time instead of a constant.
+  COPY: { ok: true; clearMs: number };
   CREATE_RESOURCE: { item: VaultItem };
   STAGE_SAVE: { ok: true };
   // The pending-save preview NEVER includes the password (display-only).
   GET_PENDING_SAVE: { pending: { name: string; username: string; uri: string } | null };
   COMMIT_SAVE: { item: VaultItem };
   DISCARD_SAVE: { ok: true };
+  API_CALL: ApiEnvelope;
 }
+
+// ---- aggregated protocol (core + domain RPC contracts in shared/rpc/*) -----
+// Domain packages implement handlers against these; only the foundation package
+// may edit the unions (see the migration blueprint's exclusive-ownership rule).
+export type Req = CoreReq | VaultReq | ShareReq | GroupsReq | AuthReq | ImportExportReq;
+
+export type RespMap = CoreRespMap &
+  VaultRespMap &
+  ShareRespMap &
+  GroupsRespMap &
+  AuthRespMap &
+  ImportExportRespMap;
 
 /** Wire envelope returned by the background for every request. */
 export type RpcResult<T> = { ok: true; data: T } | { ok: false; error: string };
+
+/**
+ * DOM event fired on `window` of EXTENSION pages when an RPC comes back with a
+ * vault-locked error while the page presumably believes it is unlocked — i.e.
+ * the background lost/locked the session behind the UI's back (MV3 worker
+ * teardown with an unreadable storage.session mirror, lock from another
+ * surface, …). The app shell listens and re-runs GET_STATUS so it falls back
+ * to the lock screen instead of dead-ending on error toasts.
+ */
+export const SESSION_DESYNC_EVENT = 'jpb:session-desync';
 
 /** UI-side helper: send a typed request and unwrap the result (throws on error). */
 export async function rpc<K extends Req['type']>(
   msg: Extract<Req, { type: K }>,
 ): Promise<RespMap[K]> {
   const res = (await chrome.runtime.sendMessage(msg)) as RpcResult<RespMap[K]> | undefined;
-  if (!res) throw new Error('No response from the background service worker.');
-  if (!res.ok) throw new Error(res.error);
+  if (!res) throw new Error(t('bg.noResponse'));
+  if (!res.ok) {
+    // Both sides render 'bg.vaultLocked' through the same storage-synced locale,
+    // so a string compare is stable. Restricted to chrome-extension: pages —
+    // never dispatch from a content script, where the host page shares the DOM
+    // and could observe the lock-state signal.
+    if (
+      res.error === t('bg.vaultLocked') &&
+      typeof window !== 'undefined' &&
+      window.location.protocol === 'chrome-extension:'
+    ) {
+      try {
+        window.dispatchEvent(new CustomEvent(SESSION_DESYNC_EVENT));
+      } catch {
+        /* best-effort nudge only */
+      }
+    }
+    throw new Error(res.error);
+  }
   return res.data;
 }
 

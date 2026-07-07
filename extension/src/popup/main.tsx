@@ -8,6 +8,7 @@ import {
   Btn, CreateResourceForm, Flow, Header, Spinner, initials, useStatus, useVault,
 } from '../ui/components';
 import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
+import { t } from '../shared/i18n';
 
 // Detached mode: this popup was re-opened as a standalone window (chrome.windows
 // .create). In that case `currentWindow` is the popup itself, so the originating
@@ -16,8 +17,20 @@ const PARAMS = new URLSearchParams(location.search);
 const DETACHED = PARAMS.get('detached') === '1';
 const DETACHED_TAB_ID = PARAMS.get('tabId') ? Number(PARAMS.get('tabId')) : null;
 
-function openVault() {
-  chrome.tabs.create({ url: chrome.runtime.getURL('app.html') });
+/**
+ * Official-parity vault entry: the vault lives at the server's /app URL, where
+ * the content script swaps in the extension-hosted app iframe (appBootstrap).
+ * Falls back to the raw extension page while no server is configured yet.
+ */
+async function openVault() {
+  try {
+    const s = await rpc({ type: 'GET_STATUS' });
+    if (s.serverUrl) {
+      await chrome.tabs.create({ url: s.serverUrl.replace(/\/+$/, '') + '/app' });
+      return;
+    }
+  } catch { /* fall through to the extension page */ }
+  await chrome.tabs.create({ url: chrome.runtime.getURL('app.html') });
 }
 
 /** The content page tab this quickaccess acts on (the detached tab, else active). */
@@ -79,12 +92,12 @@ function Quickaccess() {
       // In a detached window the source tab can be gone; never fall back to
       // whatever tab happens to be active (that could fill the wrong site).
       if (DETACHED && !tab) {
-        setFlash('The original page is no longer open.');
+        setFlash(t('flash.originalPageClosed'));
         setTimeout(() => setFlash(null), 2500);
         return;
       }
       const r = await rpc({ type: 'FILL', id, tabId: tab?.id });
-      setFlash(r.filled ? 'Filled the login form.' : 'No login form found on this page.');
+      setFlash(r.filled ? t('flash.filledLogin') : t('flash.noLoginForm'));
     } catch (e) { setFlash(e instanceof Error ? e.message : String(e)); }
     setTimeout(() => setFlash(null), 2500);
     if (!DETACHED) window.close(); // keep the detached window open for further actions
@@ -93,21 +106,23 @@ function Quickaccess() {
     try {
       const { secret } = await rpc({ type: 'REVEAL', id });
       await rpc({ type: 'COPY', text: secret.password, temporary: true });
-      setFlash('Password copied · clears in 30s.');
+      setFlash(t('flash.passwordCopied30s'));
     } catch (e) { setFlash(e instanceof Error ? e.message : String(e)); }
     setTimeout(() => setFlash(null), 2500);
   };
 
   const Row = ({ i }: { i: VaultItem }) => (
-    <div className="jpb-row" onClick={() => fill(i.id)} title="Fill this login">
+    <div className="jpb-row" onClick={() => fill(i.id)} title={t('vault.fillThisLogin')}>
       <div className="jpb-row-icon">{initials(i.name)}</div>
       <div className="jpb-row-main">
         <div className="jpb-row-name">{i.name}</div>
-        <div className="jpb-row-sub">{i.username || i.uri || '—'}</div>
+        <div className="jpb-row-sub">{i.username || i.uri || t('common.dash')}</div>
       </div>
-      <div className="jpb-row-actions">
-        <Btn small variant="ghost" title="Copy password" onClick={() => copy(i.id)}><Copy size={14} /></Btn>
-        <Btn small variant="ghost" title="Fill login" onClick={() => fill(i.id)}><LogIn size={14} /></Btn>
+      {/* Stop propagation so the action buttons don't also trigger the row's
+          fill-and-close click handler (double FILL / interrupted copy). */}
+      <div className="jpb-row-actions" onClick={(e) => e.stopPropagation()}>
+        <Btn small variant="ghost" title={t('vault.copyPassword')} onClick={(e) => { e.stopPropagation(); void copy(i.id); }}><Copy size={14} /></Btn>
+        <Btn small variant="ghost" title={t('vault.fillLogin')} onClick={(e) => { e.stopPropagation(); void fill(i.id); }}><LogIn size={14} /></Btn>
       </div>
     </div>
   );
@@ -127,29 +142,29 @@ function Quickaccess() {
     <>
       <div style={{ position: 'relative' }}>
         <Search size={15} style={{ position: 'absolute', left: 10, top: 10, color: 'var(--text-muted)' }} />
-        <input className="jpb-search" style={{ paddingLeft: 32 }} placeholder="Search vault…" value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
+        <input className="jpb-search" style={{ paddingLeft: 32 }} placeholder={t('vault.searchPlaceholder')} value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
       </div>
       {flash ? <div className="jpb-ok">{flash}</div> : null}
       {err ? <div className="jpb-error">{err}</div> : null}
 
       {matches && matches.length > 0 && !q ? (
         <div>
-          <div className="jpb-label" style={{ marginBottom: 4 }}>For this site</div>
+          <div className="jpb-label" style={{ marginBottom: 4 }}>{t('vault.forThisSite')}</div>
           <div className="jpb-list">{matches.map((i) => <Row key={'m' + i.id} i={i} />)}</div>
         </div>
       ) : null}
 
       <div>
-        {!q && matches && matches.length > 0 ? <div className="jpb-label" style={{ marginBottom: 4 }}>All passwords</div> : null}
-        {!items ? <Spinner label="Loading vault…" /> :
-          filtered.length === 0 ? <div className="jpb-empty">No matching passwords.</div> :
+        {!q && matches && matches.length > 0 ? <div className="jpb-label" style={{ marginBottom: 4 }}>{t('vault.allPasswords')}</div> : null}
+        {!items ? <Spinner label={t('flow.loadingVault')} /> :
+          filtered.length === 0 ? <div className="jpb-empty">{t('vault.noMatching')}</div> :
             <div className="jpb-list">{filtered.map((i) => <Row key={i.id} i={i} />)}</div>}
       </div>
 
       <div style={{ display: 'flex', gap: 8 }}>
-        <Btn block variant="primary" onClick={startCreate}><Plus size={14} /> New</Btn>
-        <Btn block onClick={openVault}><KeyRound size={14} /> Open vault</Btn>
-        <Btn block variant="ghost" onClick={() => reload(true)}>Refresh</Btn>
+        <Btn block variant="primary" onClick={startCreate}><Plus size={14} /> {t('common.new')}</Btn>
+        <Btn block onClick={() => void openVault()}><KeyRound size={14} /> {t('vault.openVault')}</Btn>
+        <Btn block variant="ghost" onClick={() => reload(true)}>{t('common.refresh')}</Btn>
       </div>
     </>
   );
@@ -167,11 +182,11 @@ function Popup() {
         right={
           <>
             {!DETACHED ? (
-              <Btn small variant="ghost" title="Open in a separate window" onClick={detach}>
+              <Btn small variant="ghost" title={t('header.openSeparateWindow')} onClick={detach}>
                 <ExternalLink size={14} />
               </Btn>
             ) : null}
-            <Btn small variant="ghost" title="Settings" onClick={() => chrome.runtime.openOptionsPage()}>
+            <Btn small variant="ghost" title={t('header.settings')} onClick={() => chrome.runtime.openOptionsPage()}>
               <Settings size={14} />
             </Btn>
           </>

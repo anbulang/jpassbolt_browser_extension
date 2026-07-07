@@ -8,14 +8,14 @@
  *
  * Security model (parity with the official Passbolt extension):
  *  - armored (passphrase-protected) private key + JWT live in chrome.storage.local;
- *  - the DECRYPTED private key lives ONLY in this worker's memory and is dropped
- *    on lock / logout / idle alarm / worker teardown;
+ *  - the DECRYPTED private key lives ONLY in worker memory (state.ts) and is
+ *    dropped on lock / logout / idle alarm / worker teardown;
  *  - the passphrase is never persisted.
  *
- * Cross-origin note: fetches issued from this worker to hosts in host_permissions
- * are privileged — all response headers (X-GPGAuth-*, Authorization) are readable
- * WITHOUT any server-side CORS exposure, which is why GpgAuth works here even
- * though a plain web page would be blocked.
+ * Module layout (see the migration blueprint): state.ts (session/state/lock),
+ * http.ts (envelope HTTP + GpgAuth), crypto.ts (OpenPGP primitives),
+ * metadataKey.ts (shared v5 metadata key), handlers/* (domain RPCs, merged into
+ * a registry consulted before the legacy switch below).
  */
 import * as openpgp from 'openpgp';
 import type {
@@ -31,160 +31,72 @@ import type {
 } from '../shared/messages';
 import { generateTotp, isValidTotp } from '../shared/totp';
 import { pwnedCount } from '../shared/pwned';
+import { t } from '../shared/i18n';
+import {
+  K,
+  get,
+  set,
+  del,
+  type RawResource,
+  type RawResourceType,
+  getUnlockedKey,
+  setUnlockedKey,
+  getResourceCache,
+  setResourceCache,
+  invalidateResourceCache,
+  getResourceTypeCache,
+  setResourceTypeCache,
+  armLock,
+  lock,
+  registerLockHook,
+  registerSessionResetHook,
+  currentStatus,
+  broadcastSessionState,
+  sessionReady,
+} from './state';
+import { apiCall, gpgAuth } from './http';
+import { decryptMessage, encryptForSelf } from './crypto';
+import type { HandlerMap } from './registry';
+import { coreHandlers } from './handlers/core';
+import { vaultHandlers } from './handlers/vault';
+import { shareHandlers } from './handlers/share';
+import { groupsHandlers } from './handlers/groups';
+import { authHandlers } from './handlers/auth';
+import { importExportHandlers } from './handlers/importexport';
 
-// ---------------------------------------------------------------------------
-// storage
-// ---------------------------------------------------------------------------
-const K = {
-  serverUrl: 'server_url',
-  privateKey: 'private_key_armored',
-  publicKey: 'public_key_armored',
-  jwt: 'jwt',
-  user: 'user',
-  account: 'account',
-} as const;
+// The retired SPA session-state bridge stored its target origin here; the app
+// is extension-hosted now (official-Passbolt-style iframe takeover), so drop
+// the stale key on every worker start (idempotent, best-effort).
+void chrome.storage.local.remove('app_origin').catch(() => undefined);
 
-async function get<T>(key: string): Promise<T | undefined> {
-  const o = await chrome.storage.local.get(key);
-  return o[key] as T | undefined;
-}
-async function set(items: Record<string, unknown>): Promise<void> {
-  await chrome.storage.local.set(items);
-}
-async function del(keys: string[]): Promise<void> {
-  await chrome.storage.local.remove(keys);
-}
+// MV3 cold-start compensation: after Chrome tears the idle worker down and
+// restarts it, re-announce the (rehydrated) session state so every already-open
+// surface — the app iframe, popup, server-origin tabs — re-checks GET_STATUS
+// instead of trusting a phase from before the teardown. currentStatus() awaits
+// the storage.session rehydrate internally, so this broadcast is accurate; if
+// the rehydrate found nothing the UIs fall back to the lock screen right away.
+void broadcastSessionState();
 
-// ---------------------------------------------------------------------------
-// in-memory session (lost on lock / worker teardown — that is the point)
-// ---------------------------------------------------------------------------
-let unlockedKey: openpgp.PrivateKey | null = null;
-let resourceCache: RawResource[] | null = null;
-let resourceTypeCache: RawResourceType[] | null = null;
-const LOCK_ALARM = 'jpb-lock';
-const LOCK_MINUTES = 15;
 const CLIPBOARD_CLEAR_MS = 30_000;
 
 /**
  * Post-submit credentials captured by the content script, awaiting an autosave
  * decision. Keyed by tab id; holds PLAINTEXT only in worker memory and only
- * until the user saves/dismisses or it expires. Cleared on lock/logout.
+ * until the user saves/dismisses or it expires. Cleared on lock/logout (hook).
  */
 interface PendingSave { name: string; username: string; uri: string; password: string; ts: number }
 const pendingSaves = new Map<number, PendingSave>();
 const PENDING_SAVE_TTL_MS = 3 * 60_000;
-
-function armLock(): void {
-  chrome.alarms.create(LOCK_ALARM, { delayInMinutes: LOCK_MINUTES });
-}
-function lock(): void {
-  unlockedKey = null;
-  resourceCache = null;
-  resourceTypeCache = null; // drop the type catalogue too (account/server may change)
-  pendingSaves.clear(); // never retain captured plaintext past a lock
-  chrome.alarms.clear(LOCK_ALARM);
-}
-chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === LOCK_ALARM) lock();
-});
-
-// ---------------------------------------------------------------------------
-// HTTP / API (fetch-based; envelope-aware)
-// ---------------------------------------------------------------------------
-interface Envelope<T> {
-  header: { status: string; message: string; code: number };
-  body: T | null;
-}
-
-async function apiBase(): Promise<string> {
-  const url = await get<string>(K.serverUrl);
-  if (!url) throw new Error('No server configured. Open Settings and set your JPassbolt server URL.');
-  return url.replace(/\/+$/, '') + '/api';
-}
-
-async function authHeaders(): Promise<Record<string, string>> {
-  const jwt = await get<string>(K.jwt);
-  return jwt ? { Authorization: `Bearer ${jwt}` } : {};
-}
-
-/** GET/POST/PUT that unwraps the Passbolt envelope and returns body. */
-async function apiCall<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
-  path: string,
-  body?: unknown,
-): Promise<T> {
-  const base = await apiBase();
-  const res = await fetch(base + path, {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(await authHeaders()),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (res.status === 401) {
-    // session expired -> drop credentials, force re-auth
-    await del([K.jwt]);
-    lock();
-    throw new Error('Session expired. Please unlock again.');
-  }
-  const json = (await res.json().catch(() => null)) as Envelope<T> | null;
-  if (!res.ok || !json) {
-    throw new Error(json?.header?.message || `Request failed (${res.status}).`);
-  }
-  return json.body as T;
-}
-
-// ---------------------------------------------------------------------------
-// GpgAuth (3-stage) — ported from the SPA's auth.ts, fetch + worker edition
-// ---------------------------------------------------------------------------
-async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: string }> {
-  const base = await apiBase();
-  const fingerprint = privateKey.getFingerprint();
-
-  // Stage 1: request the encrypted challenge for our keyid.
-  const stage1 = await fetch(base + '/auth/login.json', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: { gpg_auth: { keyid: fingerprint } } }),
-  });
-  if (stage1.status === 404) throw new Error('No account on the server matches this key.');
-  const encryptedToken = stage1.headers.get('x-gpgauth-user-auth-token');
-  if (!encryptedToken) throw new Error('Server did not return a GPGAuth challenge token.');
-
-  // PHP urlencode() semantics: '+' is a space, real '+' arrive as '%2B'.
-  const armored = decodeURIComponent(encryptedToken.replace(/\+/g, ' '));
-  const message = await openpgp.readMessage({ armoredMessage: armored });
-  const { data: nonce } = await openpgp.decrypt({ message, decryptionKeys: privateKey });
-
-  // Stage 2: return the decrypted nonce.
-  const stage2 = await fetch(base + '/auth/login.json', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      data: { gpg_auth: { keyid: fingerprint, user_token_result: nonce } },
-    }),
-  });
-  const authHeader = stage2.headers.get('authorization');
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    throw new Error('Authentication failed: no JWT returned.');
-  }
-  return { jwt: authHeader.substring(7) };
-}
+registerLockHook(() => pendingSaves.clear()); // never retain captured plaintext past a lock
+// Also purge on every UNLOCK (session-reset): the account may have changed via
+// IMPORT_KEY/recovery without a lock in between — plaintext captured under the
+// previous account must never be committable into the new account's vault.
+registerSessionResetHook(() => pendingSaves.clear());
 
 // ---------------------------------------------------------------------------
 // vault
 // ---------------------------------------------------------------------------
 interface RawSecret { data: string }
-interface RawResource {
-  id: string;
-  name?: string;
-  username?: string;
-  uri?: string;
-  resource_type_id?: string;
-  metadata?: string | null;
-}
-interface RawResourceType { id: string; slug: string; deleted?: string | null }
 
 /**
  * Canonical Passbolt v4 resource-type seed UUIDs. The server ships these exact
@@ -200,7 +112,7 @@ const RESOURCE_TYPE_ID = {
 function toItem(r: RawResource): VaultItem {
   return {
     id: r.id,
-    name: r.name || '(encrypted item)',
+    name: r.name || t('bg.encryptedItem'),
     username: r.username || '',
     uri: r.uri || '',
     resourceTypeId: r.resource_type_id || '',
@@ -208,11 +120,13 @@ function toItem(r: RawResource): VaultItem {
 }
 
 async function listResources(force = false): Promise<VaultItem[]> {
-  if (!resourceCache || force) {
-    resourceCache = await apiCall<RawResource[]>('GET', '/resources.json');
+  let cache = getResourceCache();
+  if (!cache || force) {
+    cache = await apiCall<RawResource[]>('GET', '/resources.json');
+    setResourceCache(cache);
   }
   armLock();
-  return (resourceCache ?? []).map(toItem);
+  return (cache ?? []).map(toItem);
 }
 
 /** Live resource-type catalogue (cached); used to resolve a create's type id. */
@@ -220,12 +134,13 @@ async function listResourceTypes(): Promise<RawResourceType[]> {
   // Cache only a successful, non-empty fetch. An empty array is truthy, so
   // caching a failed first fetch would pin the seed-UUID fallback for the whole
   // session even after connectivity returns; re-try until we get a real list.
-  if (!resourceTypeCache || resourceTypeCache.length === 0) {
+  const cached = getResourceTypeCache();
+  if (!cached || cached.length === 0) {
     const fetched = await apiCall<RawResourceType[]>('GET', '/resource-types.json').catch(() => null);
-    if (fetched && fetched.length) resourceTypeCache = fetched;
+    if (fetched && fetched.length) setResourceTypeCache(fetched);
     return fetched ?? [];
   }
-  return resourceTypeCache;
+  return cached;
 }
 
 /**
@@ -242,22 +157,32 @@ async function passwordAndDescriptionTypeId(): Promise<string> {
 
 /** Decrypt the current user's secret for a resource into named fields. */
 async function revealSecret(id: string): Promise<{ item: VaultItem; secret: SecretFields }> {
-  if (!unlockedKey) throw new Error('Vault is locked.');
+  if (!getUnlockedKey()) throw new Error(t('bg.vaultLocked'));
   const items = await listResources();
   const item = items.find((i) => i.id === id);
-  if (!item) throw new Error('Resource not found.');
+  if (!item) {
+    // The id came from a previously served list, so the cache is stale (the
+    // item was deleted elsewhere). Drop it so FIND_FOR_URL / LIST stop
+    // suggesting the ghost entry.
+    invalidateResourceCache();
+    throw new Error(t('bg.resourceNotFound'));
+  }
 
-  const sec = await apiCall<RawSecret>('GET', `/secrets/resource/${id}.json`);
-  const message = await openpgp.readMessage({ armoredMessage: sec.data });
-  const { data: clear } = await openpgp.decrypt({ message, decryptionKeys: unlockedKey });
-  const secret = parseSecret(typeof clear === 'string' ? clear : await streamToText(clear));
+  let sec: RawSecret;
+  try {
+    sec = await apiCall<RawSecret>('GET', `/secrets/resource/${id}.json`);
+  } catch (e) {
+    // The cached list said the item exists but its secret fetch failed — the
+    // 404 case means it was deleted server-side after the list was cached.
+    // Blanket invalidation is cheap (lazily reloaded full table) and safe even
+    // when the failure was transient, so drop the cache and rethrow.
+    invalidateResourceCache();
+    throw e;
+  }
+  const clear = await decryptMessage(sec.data);
+  const secret = parseSecret(clear);
   armLock();
   return { item, secret };
-}
-
-async function streamToText(s: unknown): Promise<string> {
-  // openpgp may return a WebStream when the input is streamed; coerce to string.
-  return await new Response(s as ReadableStream).text();
 }
 
 function parseSecret(clear: string): SecretFields {
@@ -323,39 +248,16 @@ async function findForUrl(url: string): Promise<VaultItem[]> {
 // ---------------------------------------------------------------------------
 // resource creation (write path) — encrypt+sign for self, POST /resources.json
 // ---------------------------------------------------------------------------
-async function ownPublicKeyArmored(): Promise<string> {
-  const pub = await get<string>(K.publicKey);
-  if (!pub) throw new Error('Your public key is unavailable. Re-import your key in Settings.');
-  return pub;
-}
-
-/**
- * Encrypt a secret plaintext to the current user's OWN public key, signing with
- * the in-memory private key. Produces exactly one Secret row for the creator —
- * zero-knowledge is preserved (the server only ever sees ciphertext).
- */
-async function encryptForSelf(plaintext: string): Promise<string> {
-  if (!unlockedKey) throw new Error('Vault is locked.');
-  const pub = await openpgp.readKey({ armoredKey: await ownPublicKeyArmored() });
-  const message = await openpgp.createMessage({ text: plaintext });
-  const armored = await openpgp.encrypt({
-    message,
-    encryptionKeys: pub,
-    signingKeys: unlockedKey, // sign so the secret looks native to official clients
-  });
-  return armored as string;
-}
-
 /**
  * Create a new v4 "password and description" resource. Encrypts+signs the secret
  * for the creator only, POSTs to /resources.json (the creator is granted OWNER
  * server-side), then invalidates the cache so the item appears everywhere.
  */
 async function createResource(input: CreateResourceInput): Promise<{ item: VaultItem }> {
-  if (!unlockedKey) throw new Error('Vault is locked.');
+  if (!getUnlockedKey()) throw new Error(t('bg.vaultLocked'));
   const name = input.name.trim();
-  if (!name) throw new Error('A name is required.');
-  if (!input.password) throw new Error('A password is required.');
+  if (!name) throw new Error(t('bg.nameRequired'));
+  if (!input.password) throw new Error(t('bg.passwordRequired'));
 
   const resourceTypeId = await passwordAndDescriptionTypeId();
   // password-and-description: the description is encrypted INSIDE the secret JSON;
@@ -375,7 +277,7 @@ async function createResource(input: CreateResourceInput): Promise<{ item: Vault
     secrets: [{ data }],
   };
   const created = await apiCall<RawResource>('POST', '/resources.json', dto);
-  resourceCache = null; // force a fresh list on next read
+  invalidateResourceCache(); // force a fresh list on next read
   armLock();
   return { item: toItem(created) };
 }
@@ -385,7 +287,7 @@ async function createResource(input: CreateResourceInput): Promise<{ item: Vault
 // ---------------------------------------------------------------------------
 function stageSave(tabId: number, p: Omit<PendingSave, 'ts'>): { ok: true } {
   // Only stage while unlocked AND when there is a password worth saving.
-  if (unlockedKey && p.password) {
+  if (getUnlockedKey() && p.password) {
     pendingSaves.set(tabId, { ...p, ts: Date.now() });
   }
   return { ok: true };
@@ -399,8 +301,8 @@ async function getPendingSave(tabId: number): Promise<{ pending: { name: string;
   // Suppress the prompt if this exact login is already saved. Ensure the list is
   // loaded first (the cache may be cold on a fresh page) and compare host +
   // username case-insensitively (createResource trims; captured creds may not).
-  let list: RawResource[] = resourceCache ?? [];
-  try { await listResources(); list = resourceCache ?? list; } catch { /* offline — best-effort */ }
+  let list: RawResource[] = getResourceCache() ?? [];
+  try { await listResources(); list = getResourceCache() ?? list; } catch { /* offline — best-effort */ }
   const host = hostOf(p.uri);
   const user = p.username.trim().toLowerCase();
   const dup = list.some(
@@ -412,7 +314,7 @@ async function getPendingSave(tabId: number): Promise<{ pending: { name: string;
 
 async function commitSave(tabId: number): Promise<{ item: VaultItem }> {
   const p = pendingSaves.get(tabId);
-  if (!p) throw new Error('Nothing to save.');
+  if (!p) throw new Error(t('bg.nothingToSave'));
   // Create FIRST; drop the staged plaintext only once the resource is persisted.
   // A recoverable failure (auto-locked vault, expired JWT, server/network error)
   // then leaves the captured credential available for a retry instead of losing
@@ -442,34 +344,31 @@ function buildAccount(serverUrl: string, user: RawUser, fingerprint: string): Ac
   return { serverUrl, username: user.username, fullName: fullName || user.username, fingerprint, userId: user.id };
 }
 
-async function currentStatus(): Promise<StatusResult> {
-  const serverUrl = (await get<string>(K.serverUrl)) ?? '';
-  const account = (await get<AccountInfo>(K.account)) ?? null;
-  let phase: StatusResult['phase'];
-  if (!serverUrl) phase = 'no_server';
-  else if (!(await get<string>(K.privateKey))) phase = 'no_account';
-  else if (!unlockedKey) phase = 'locked';
-  else phase = 'unlocked';
-  return { phase, serverUrl, account };
-}
-
 /** Validate + persist the armored private key (must be passphrase-protected). */
 async function importKey(armoredPrivateKey: string): Promise<StatusResult> {
   let key: openpgp.PrivateKey;
   try {
     key = await openpgp.readPrivateKey({ armoredKey: armoredPrivateKey });
   } catch {
-    throw new Error('Invalid OpenPGP private key.');
+    throw new Error(t('bg.invalidPrivateKey'));
   }
   if (key.isDecrypted()) {
-    throw new Error(
-      'This private key is not passphrase-protected. JPassbolt refuses to store an unprotected key.',
-    );
+    throw new Error(t('bg.keyNotProtected'));
   }
+  // A (possibly different) identity replaces whatever account lived here —
+  // mirror SETUP_GENERATE_KEY: tear down any live session FIRST. lock() fires
+  // every registered hook (pendingSaves plaintext, pending MFA, shared metadata
+  // key, import/export staging, vault caches), then the previous account's
+  // credentials are dropped so the next UNLOCK runs a fresh GpgAuth with THIS
+  // key instead of reusing a JWT minted for the previous one — a stale session
+  // must never be able to write state captured under account A into account B.
+  lock();
   await set({
     [K.privateKey]: armoredPrivateKey,
     [K.publicKey]: key.toPublic().armor(),
   });
+  await del([K.jwt, K.user, K.account]);
+  void broadcastSessionState();
   return currentStatus();
 }
 
@@ -480,26 +379,28 @@ async function importKey(armoredPrivateKey: string): Promise<StatusResult> {
 async function unlock(passphrase: string): Promise<StatusResult> {
   // Drop any in-memory caches from a previous session/account so a re-import +
   // unlock never serves the prior account's resource list or type catalogue.
-  resourceCache = null;
-  resourceTypeCache = null;
+  invalidateResourceCache();
+  setResourceTypeCache(null);
   pendingSaves.clear();
 
   const armored = await get<string>(K.privateKey);
   const serverUrl = await get<string>(K.serverUrl);
-  if (!serverUrl) throw new Error('No server configured.');
-  if (!armored) throw new Error('No private key imported yet.');
+  if (!serverUrl) throw new Error(t('bg.noServerConfiguredShort'));
+  if (!armored) throw new Error(t('bg.noPrivateKeyImported'));
 
   let key: openpgp.PrivateKey;
   try {
     key = await openpgp.readPrivateKey({ armoredKey: armored });
   } catch {
-    throw new Error('Stored private key is corrupt. Re-import it in Settings.');
+    throw new Error(t('bg.storedKeyCorrupt'));
   }
+  let unlocked: openpgp.PrivateKey;
   try {
-    unlockedKey = await openpgp.decryptKey({ privateKey: key, passphrase });
+    unlocked = await openpgp.decryptKey({ privateKey: key, passphrase });
   } catch {
-    throw new Error('Incorrect passphrase.');
+    throw new Error(t('bg.incorrectPassphrase'));
   }
+  setUnlockedKey(unlocked);
 
   // Ensure a session JWT. Try the existing one with a cheap authenticated call;
   // if it's missing/expired, run the full 3-stage GpgAuth.
@@ -513,20 +414,22 @@ async function unlock(passphrase: string): Promise<StatusResult> {
     }
   }
   if (!haveSession) {
-    const { jwt } = await gpgAuth(unlockedKey);
+    const { jwt } = await gpgAuth(unlocked);
     await set({ [K.jwt]: jwt });
   }
 
   const me = await apiCall<RawUser>('GET', '/users/me.json');
-  const account = buildAccount(serverUrl, me, unlockedKey.getFingerprint());
+  const account = buildAccount(serverUrl, me, unlocked.getFingerprint());
   await set({ [K.user]: me, [K.account]: account });
   armLock();
+  void broadcastSessionState();
   return currentStatus();
 }
 
 async function logout(): Promise<StatusResult> {
   lock();
   await del([K.privateKey, K.publicKey, K.jwt, K.user, K.account]);
+  void broadcastSessionState(); // now resolves to 'logged_out' (key removed)
   return currentStatus();
 }
 
@@ -541,7 +444,7 @@ async function logout(): Promise<StatusResult> {
 async function targetTabId(explicit?: number): Promise<number> {
   if (explicit != null) return explicit;
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) throw new Error('No active tab.');
+  if (!tab?.id) throw new Error(t('bg.noActiveTab'));
   return tab.id;
 }
 
@@ -592,11 +495,44 @@ async function fillActiveTab(id: string, tabId?: number): Promise<{ filled: bool
 /** Decrypt the resource's TOTP, compute the current code, and fill it on the page. */
 async function fillTotpActiveTab(id: string, tabId?: number): Promise<{ filled: boolean }> {
   const { item, secret } = await revealSecret(id);
-  if (!isValidTotp(secret.totp)) throw new Error('This item has no TOTP configured.');
+  if (!isValidTotp(secret.totp)) throw new Error(t('bg.noTotpConfigured'));
   const { code } = await generateTotp(secret.totp);
   const target = await targetTabId(tabId);
   const msg: ContentReq = { type: 'DO_FILL_TOTP', code };
   return { filled: await fillAcrossFrames(target, msg, hostOf(item.uri) || undefined) };
+}
+
+// ---------------------------------------------------------------------------
+// quickaccess launcher (in-page "browse all passwords")
+// ---------------------------------------------------------------------------
+/**
+ * Open the quickaccess popup. Prefer chrome.action.openPopup() (Chrome 127+),
+ * which shows the SAME popup UI anchored to the toolbar icon; it needs a user
+ * gesture and is not available everywhere, so on any failure fall back to the
+ * existing DETACHED quickaccess window (still the popup UI, not a full-page
+ * tab). The originating tab id is carried so the small window can target the
+ * page it was opened from.
+ */
+async function openQuickaccess(): Promise<{ ok: true }> {
+  if (typeof chrome.action?.openPopup === 'function') {
+    try {
+      await chrome.action.openPopup();
+      return { ok: true };
+    } catch { /* needs a gesture / unsupported — fall through to the window */ }
+  }
+  let tabId: number | undefined;
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    tabId = tab?.id;
+  } catch { /* no active tab discoverable — open without a target */ }
+  const qs = tabId != null ? `?detached=1&tabId=${tabId}` : '?detached=1';
+  await chrome.windows.create({
+    url: chrome.runtime.getURL('popup.html' + qs),
+    type: 'popup',
+    width: 380,
+    height: 600,
+  });
+  return { ok: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -619,25 +555,62 @@ async function ensureOffscreen(): Promise<void> {
 /** Copy `text`; when `clearAfterMs > 0` the offscreen doc wipes it afterwards. */
 async function copyToClipboard(text: string, clearAfterMs: number): Promise<void> {
   await ensureOffscreen();
-  await chrome.runtime.sendMessage({ target: 'offscreen', type: 'clipboard-write', text, clearAfterMs });
+  // The offscreen doc reports execCommand('copy')'s result; a failed write
+  // must reject the COPY RPC so the UI shows an error instead of a fake
+  // "copied" toast while the clipboard still holds its previous content.
+  const res = (await chrome.runtime.sendMessage({ target: 'offscreen', type: 'clipboard-write', text, clearAfterMs })) as
+    | { ok?: boolean }
+    | undefined;
+  if (!res?.ok) throw new Error(t('bg.clipboardWriteFailed'));
 }
 
 // ---------------------------------------------------------------------------
-// message router
+// message router — registry first (domain handlers), legacy switch fallback
 // ---------------------------------------------------------------------------
+const handlers: HandlerMap = {
+  ...coreHandlers,
+  ...vaultHandlers,
+  ...shareHandlers,
+  ...groupsHandlers,
+  ...authHandlers,
+  ...importExportHandlers,
+};
+
 function senderTabId(sender: chrome.runtime.MessageSender): number {
   const id = sender.tab?.id;
-  if (id == null) throw new Error('This action requires a tab context.');
+  if (id == null) throw new Error(t('bg.requiresTabContext'));
   return id;
 }
 
 async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  // A request is frequently the very event that woke a torn-down worker: gate
+  // EVERY dispatch on the storage.session rehydrate so the synchronous
+  // getUnlockedKey() checks inside the handlers (and crypto.ts) never race it
+  // and throw a spurious 'vault locked' for a session that is still live.
+  await sessionReady();
+  const handler = handlers[req.type];
+  if (handler) return handler(req, sender);
   switch (req.type) {
     case 'GET_STATUS':
       return currentStatus();
-    case 'SET_SERVER':
-      await set({ [K.serverUrl]: req.serverUrl.trim() });
+    case 'SET_SERVER': {
+      const nextUrl = req.serverUrl.trim();
+      const prevUrl = (await get<string>(K.serverUrl)) ?? '';
+      await set({ [K.serverUrl]: nextUrl });
+      if (prevUrl && prevUrl !== nextUrl) {
+        // The server actually changed: the live session, JWT, cached user /
+        // account and the shared v5 metadata key all belong to the OLD server.
+        // lock() clears every session-scoped hook (metadata key included) so a
+        // later UNLOCK can never encrypt new-server data to the old server's
+        // metadata key; the old JWT/user/account are dropped alongside. The
+        // account PRIVATE key is kept — pointing an existing account at a moved
+        // server must not destroy the key.
+        lock();
+        await del([K.jwt, K.user, K.account]);
+        void broadcastSessionState();
+      }
       return currentStatus();
+    }
     case 'IMPORT_KEY':
       return importKey(req.armoredPrivateKey);
     case 'UNLOCK':
@@ -647,6 +620,8 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
       return currentStatus();
     case 'LOGOUT':
       return logout();
+    case 'OPEN_QUICKACCESS':
+      return openQuickaccess();
     case 'LIST':
       return { items: await listResources(req.force) };
     case 'REVEAL':
@@ -659,9 +634,16 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
       return fillTotpActiveTab(req.id, req.tabId);
     case 'PWNED':
       return { count: await pwnedCount(req.password) };
-    case 'COPY':
-      await copyToClipboard(req.text, req.temporary ? CLIPBOARD_CLEAR_MS : 0);
-      return { ok: true };
+    case 'COPY': {
+      // Clear delay is user-configurable from the app's settings page
+      // ('jpb_clipboard_clear_ms', 0 = never auto-clear); default 30s.
+      const stored = await get<number>('jpb_clipboard_clear_ms');
+      const clearMs = typeof stored === 'number' && stored >= 0 ? stored : CLIPBOARD_CLEAR_MS;
+      const effectiveMs = req.temporary ? clearMs : 0;
+      await copyToClipboard(req.text, effectiveMs);
+      // Report the delay actually applied so UI burn notices match reality.
+      return { ok: true, clearMs: effectiveMs };
+    }
     case 'CREATE_RESOURCE':
       return createResource(req.input);
     case 'STAGE_SAVE':
@@ -673,7 +655,7 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
     case 'DISCARD_SAVE':
       return discardSave(senderTabId(sender));
     default:
-      throw new Error(`Unknown request: ${(req as { type: string }).type}`);
+      throw new Error(t('bg.unknownRequest', { type: (req as { type: string }).type }));
   }
 }
 

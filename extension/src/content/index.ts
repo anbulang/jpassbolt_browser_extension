@@ -11,9 +11,10 @@
  * JPassbolt server origin (never act on our own app), and history/MutationObserver
  * hooks because tabs.onUpdated never fires on SPA route changes.
  */
-import { rpc, type ContentReq, type ContentResult } from '../shared/messages';
+import { rpc, type ContentReq, type ContentResult, type SessionChangedMsg } from '../shared/messages';
 import { fill, fillTotp, passwordFields, ctaAnchor, captureCredentials } from './dom';
 import { InForm } from './inform';
+import { maybeBootstrapApp } from './appBootstrap';
 
 // --- idempotency: never initialize twice in one frame ----------------------
 declare global { interface Window { __jpbContent?: true } }
@@ -166,6 +167,21 @@ function init(): void {
         );
       }
     } catch { /* nothing staged */ }
+  }
+
+  // --- app takeover (official-Passbolt-style pagemod) ----------------------
+  // On the configured server domain (`/` or `/app*`) the extension REPLACES
+  // the server's skeleton page with an extension-origin iframe hosting the
+  // real app — see appBootstrap.ts. This runs exactly where the exclusion
+  // gate above turns autofill/CTA/autosave OFF: on our own server origin the
+  // only job of this content script is the takeover.
+  // Mount is attempted once at injection and again on every session-state
+  // broadcast (e.g. the user just imported a key while on the skeleton page).
+  if (TOP) {
+    void maybeBootstrapApp();
+    chrome.runtime.onMessage.addListener((msg: SessionChangedMsg | ContentReq) => {
+      if (msg?.type === 'SESSION_CHANGED') void maybeBootstrapApp();
+    });
   }
 
   // --- SPA navigation + dynamic forms (⑦) ---------------------------------

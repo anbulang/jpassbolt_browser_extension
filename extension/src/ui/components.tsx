@@ -2,10 +2,12 @@ import {
   useCallback,
   useEffect,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
 import { Copy, Dices, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Plus, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
+import { t } from '../shared/i18n';
 import { generateTotp, isValidTotp, type TotpConfig } from '../shared/totp';
 import {
   DEFAULT_PASSPHRASE_OPTIONS, DEFAULT_PASSWORD_OPTIONS,
@@ -13,11 +15,12 @@ import {
   passphraseEntropyBits, passwordEntropyBits, passwordPoolSize,
   type PassphraseOptions, type PasswordOptions,
 } from '../shared/passgen';
+import MfaChallenge from '../app/components/MfaChallenge';
 
 // ---- primitives -----------------------------------------------------------
 export function Btn(props: {
   children: ReactNode;
-  onClick?: () => void;
+  onClick?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
   type?: 'button' | 'submit';
   variant?: 'primary' | 'default' | 'ghost';
   block?: boolean;
@@ -76,20 +79,21 @@ export function ServerForm({ initial, onDone }: { initial?: string; onDone: (s: 
   };
   return (
     <div className="jpb-card">
-      <div className="jpb-h2"><Server size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />Connect to your server</div>
-      <p className="jpb-muted">Enter the URL of your JPassbolt server.</p>
+      <div className="jpb-h2"><Server size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('server.title')}</div>
+      <p className="jpb-muted">{t('server.intro')}</p>
       <div className="jpb-field" style={{ marginTop: 12 }}>
-        <label className="jpb-label">Server URL</label>
-        <input className="jpb-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://passbolt.example.com" />
+        <label className="jpb-label">{t('server.label')}</label>
+        <input className="jpb-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder={t('server.placeholder')} />
       </div>
       <ErrorMsg text={err} />
-      <Btn variant="primary" block onClick={submit} disabled={busy}>{busy ? 'Saving…' : 'Continue'}</Btn>
+      <Btn variant="primary" block onClick={submit} disabled={busy}>{busy ? t('server.saving') : t('common.continue')}</Btn>
     </div>
   );
 }
 
 export function KeyImportForm({ onDone }: { onDone: (s: StatusResult) => void }) {
   const [key, setKey] = useState('');
+  const [fileName, setFileName] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const submit = async () => {
@@ -98,18 +102,39 @@ export function KeyImportForm({ onDone }: { onDone: (s: StatusResult) => void })
     catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
     finally { setBusy(false); }
   };
-  const onFile = async (f: File | null) => { if (f) setKey(await f.text()); };
+  // Never echo the armored private key back into the UI: file contents go
+  // straight to state and only the file name is shown.
+  const onFile = async (f: File | null) => {
+    if (!f) return;
+    setKey(await f.text());
+    setFileName(f.name);
+  };
+  const clearFile = () => { setKey(''); setFileName(null); };
   return (
     <div className="jpb-card">
-      <div className="jpb-h2"><KeyRound size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />Import your private key</div>
-      <p className="jpb-muted">Paste your passphrase-protected OpenPGP private key. It is stored only in the extension and never leaves your browser.</p>
-      <div className="jpb-field" style={{ marginTop: 12 }}>
-        <label className="jpb-label">Armored private key</label>
-        <textarea className="jpb-textarea" value={key} onChange={(e) => setKey(e.target.value)} placeholder="-----BEGIN PGP PRIVATE KEY BLOCK-----" />
-      </div>
-      <input type="file" accept=".asc,.txt,.key,.pgp" onChange={(e) => onFile(e.target.files?.[0] ?? null)} style={{ fontSize: 12, marginBottom: 12 }} />
+      <div className="jpb-h2"><KeyRound size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('key.title')}</div>
+      <p className="jpb-muted">{t('key.intro')}</p>
+      {fileName ? (
+        <div className="jpb-field" style={{ marginTop: 12 }}>
+          <label className="jpb-label">{t('key.label')}</label>
+          <div className="jpb-keychip">
+            <KeyRound size={14} style={{ verticalAlign: '-2px', marginRight: 6 }} />
+            <span>{t('key.fileLoaded', { name: fileName })}</span>
+            <button type="button" className="jpb-link" style={{ marginLeft: 'auto' }} onClick={clearFile}>{t('key.clearFile')}</button>
+          </div>
+        </div>
+      ) : (
+        <div className="jpb-field" style={{ marginTop: 12 }}>
+          <label className="jpb-label">{t('key.label')}</label>
+          {/* jpb-masked renders the pasted key like a password field */}
+          <textarea className="jpb-textarea jpb-masked" value={key} onChange={(e) => setKey(e.target.value)} placeholder={t('key.placeholder')} />
+        </div>
+      )}
+      {fileName ? null : (
+        <input type="file" accept=".asc,.txt,.key,.pgp" onChange={(e) => onFile(e.target.files?.[0] ?? null)} style={{ fontSize: 12, marginBottom: 12 }} />
+      )}
       <ErrorMsg text={err} />
-      <Btn variant="primary" block onClick={submit} disabled={busy || !key.trim()}>{busy ? 'Importing…' : 'Import key'}</Btn>
+      <Btn variant="primary" block onClick={submit} disabled={busy || !key.trim()}>{busy ? t('key.importing') : t('key.import')}</Btn>
     </div>
   );
 }
@@ -131,16 +156,16 @@ export function UnlockForm({ account, onDone, onLogout }: {
   };
   return (
     <form className="jpb-card" onSubmit={submit}>
-      <div className="jpb-h2"><Lock size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />Unlock your vault</div>
-      <p className="jpb-muted">{account ? `Signed in as ${account.username}` : 'Enter your passphrase to unlock.'}</p>
+      <div className="jpb-h2"><Lock size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('unlock.title')}</div>
+      <p className="jpb-muted">{account ? t('unlock.signedInAs', { username: account.username }) : t('unlock.enterPassphrase')}</p>
       <div className="jpb-field" style={{ marginTop: 12 }}>
-        <label className="jpb-label">Passphrase</label>
+        <label className="jpb-label">{t('unlock.passphrase')}</label>
         <input className="jpb-input" type="password" autoFocus value={pass} onChange={(e) => setPass(e.target.value)} />
       </div>
       <ErrorMsg text={err} />
-      <Btn type="submit" variant="primary" block disabled={busy || !pass}>{busy ? 'Unlocking…' : 'Unlock'}</Btn>
+      <Btn type="submit" variant="primary" block disabled={busy || !pass}>{busy ? t('unlock.unlocking') : t('unlock.unlock')}</Btn>
       <div style={{ textAlign: 'center', marginTop: 10 }}>
-        <button type="button" className="jpb-link" onClick={onLogout}>Use a different account</button>
+        <button type="button" className="jpb-link" onClick={onLogout}>{t('unlock.useDifferentAccount')}</button>
       </div>
     </form>
   );
@@ -156,7 +181,19 @@ export function Flow({ status, onChange, children }: {
   children: ReactNode;
 }) {
   const logout = async () => onChange(await rpc({ type: 'LOGOUT' }));
-  if (!status) return <Spinner label="Loading…" />;
+  if (!status) return <Spinner label={t('flow.loading')} />;
+  // Login-time MFA gate: UNLOCK (or GET_STATUS while a challenge is parked in
+  // the worker) reports phase:'locked' + mfa.required — the session's pending
+  // JWT lives only in background memory until MFA_VERIFY succeeds. Cancelling
+  // sends LOCK, which wipes the parked challenge and falls back to UnlockForm.
+  if (status.mfa?.required) {
+    return (
+      <MfaChallenge
+        onDone={onChange}
+        onCancel={async () => onChange(await rpc({ type: 'LOCK' }))}
+      />
+    );
+  }
   switch (status.phase) {
     case 'no_server':
       return <ServerForm onDone={onChange} />;
@@ -191,7 +228,7 @@ export function Header({ account, onLock, right }: {
       <div className="jpb-spacer" />
       {right}
       {onLock ? (
-        <Btn small variant="ghost" onClick={onLock} title="Lock vault"><Lock size={14} /></Btn>
+        <Btn small variant="ghost" onClick={onLock} title={t('header.lockVault')}><Lock size={14} /></Btn>
       ) : null}
     </header>
   );
@@ -240,28 +277,32 @@ export function TotpView({ cfg, onCopy, onFill }: {
   onCopy: (code: string) => void;
   onFill?: () => void;
 }) {
-  const t = useTotp(cfg);
-  if (!t) return null;
-  const pretty = t.code.length === 6 ? `${t.code.slice(0, 3)} ${t.code.slice(3)}` : t.code;
+  const tick = useTotp(cfg);
+  if (!tick) return null;
+  const pretty = tick.code.length === 6 ? `${tick.code.slice(0, 3)} ${tick.code.slice(3)}` : tick.code;
   return (
     <div className="jpb-field" style={{ margin: 0 }}>
-      <span className="jpb-label">Verification code (TOTP)</span>
+      <span className="jpb-label">{t('totp.label')}</span>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <div className="jpb-secret-val" style={{ flex: 1, fontSize: 18, letterSpacing: '0.12em' }}>{pretty}</div>
-        <span className="jpb-totp-clock" title="Seconds until refresh">{t.expiresInSec}s</span>
-        <Btn small variant="ghost" title="Copy code" onClick={() => onCopy(t.code)}><Copy size={14} /></Btn>
-        {onFill ? <Btn small variant="ghost" title="Fill code on page" onClick={onFill}><LogIn size={14} /></Btn> : null}
+        <span className="jpb-totp-clock" title={t('totp.secondsUntilRefresh')}>{tick.expiresInSec}s</span>
+        <Btn small variant="ghost" title={t('totp.copyCode')} onClick={() => onCopy(tick.code)}><Copy size={14} /></Btn>
+        {onFill ? <Btn small variant="ghost" title={t('totp.fillCodeOnPage')} onClick={onFill}><LogIn size={14} /></Btn> : null}
       </div>
     </div>
   );
 }
 
 // ---- strength labelling (shared by generator + create form) ---------------
+// Tiers mirror the official styleguide ENTROPY_THRESHOLDS (not_available 0 /
+// very-weak >=1 / weak >=60 / fair >=80 / strong >=112 / very-strong >=128).
 export function strengthFromEntropy(bits: number): { label: string; cls: string } {
-  if (bits < 60) return { label: 'Weak', cls: 'weak' };
-  if (bits < 80) return { label: 'Fair', cls: 'fair' };
-  if (bits < 120) return { label: 'Strong', cls: 'strong' };
-  return { label: 'Excellent', cls: 'excellent' };
+  if (bits >= 128) return { label: t('strength.veryStrong'), cls: 'very-strong' };
+  if (bits >= 112) return { label: t('strength.strong'), cls: 'strong' };
+  if (bits >= 80) return { label: t('strength.fair'), cls: 'fair' };
+  if (bits >= 60) return { label: t('strength.weak'), cls: 'weak' };
+  if (bits >= 1) return { label: t('strength.veryWeak'), cls: 'very-weak' };
+  return { label: t('strength.notAvailable'), cls: 'na' };
 }
 
 // ---- password / passphrase generator --------------------------------------
@@ -295,54 +336,54 @@ export function PasswordGenerator({ onUse }: { onUse?: (value: string) => void }
 
   return (
     <div className="jpb-card">
-      <div className="jpb-h2"><Dices size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />Password generator</div>
+      <div className="jpb-h2"><Dices size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('gen.title')}</div>
 
       <div style={{ display: 'flex', gap: 6, margin: '4px 0 12px' }}>
-        <Btn small variant={mode === 'password' ? 'primary' : 'default'} onClick={() => setMode('password')}>Password</Btn>
-        <Btn small variant={mode === 'passphrase' ? 'primary' : 'default'} onClick={() => setMode('passphrase')}>Passphrase</Btn>
+        <Btn small variant={mode === 'password' ? 'primary' : 'default'} onClick={() => setMode('password')}>{t('gen.password')}</Btn>
+        <Btn small variant={mode === 'passphrase' ? 'primary' : 'default'} onClick={() => setMode('passphrase')}>{t('gen.passphrase')}</Btn>
       </div>
 
       <div className="jpb-secret-val" style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 14, wordBreak: 'break-all' }}>
         <span style={{ flex: 1 }}>{value}</span>
-        <Btn small variant="ghost" title="Regenerate" onClick={regen}><RefreshCw size={14} /></Btn>
-        <Btn small variant="ghost" title="Copy" onClick={copy}><Copy size={14} /></Btn>
+        <Btn small variant="ghost" title={t('gen.regenerate')} onClick={regen}><RefreshCw size={14} /></Btn>
+        <Btn small variant="ghost" title={t('gen.copy')} onClick={copy}><Copy size={14} /></Btn>
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '8px 0' }}>
         <span className={`jpb-strength ${strength.cls}`}>{strength.label}</span>
-        <span className="jpb-muted" style={{ fontSize: 12 }}>~{entropy} bits</span>
+        <span className="jpb-muted" style={{ fontSize: 12 }}>{t('gen.bits', { bits: entropy })}</span>
         <span style={{ flex: 1 }} />
-        <Btn small variant="ghost" onClick={check} disabled={checking || !value}>{checking ? 'Checking…' : 'Check breaches'}</Btn>
+        <Btn small variant="ghost" onClick={check} disabled={checking || !value}>{checking ? t('detail.checking') : t('gen.checkBreaches')}</Btn>
       </div>
       {pwned !== null ? (
-        pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>Breach check unavailable.</div>
-          : pwned === 0 ? <div className="jpb-ok">Not found in known breaches.</div>
-            : <div className="jpb-error">Found in {pwned.toLocaleString()} known breaches — choose another.</div>
+        pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>{t('breach.unavailable')}</div>
+          : pwned === 0 ? <div className="jpb-ok">{t('breach.notFound')}</div>
+            : <div className="jpb-error">{t('breach.foundChooseAnother', { count: pwned.toLocaleString() })}</div>
       ) : null}
 
       {mode === 'password' ? (
         <div style={{ marginTop: 10 }}>
-          <label className="jpb-label" style={{ display: 'block', marginBottom: 6 }}>Length: {pw.length}</label>
+          <label className="jpb-label" style={{ display: 'block', marginBottom: 6 }}>{t('gen.length', { n: pw.length })}</label>
           <input type="range" min={8} max={64} value={pw.length} onChange={(e) => setPw((o) => ({ ...o, length: Number(e.target.value) }))} style={{ width: '100%' }} />
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, marginTop: 8, fontSize: 13 }}>
             <label><input type="checkbox" checked={pw.upper} onChange={() => toggle('upper')} /> A-Z</label>
             <label><input type="checkbox" checked={pw.lower} onChange={() => toggle('lower')} /> a-z</label>
             <label><input type="checkbox" checked={pw.digits} onChange={() => toggle('digits')} /> 0-9</label>
             <label><input type="checkbox" checked={pw.special} onChange={() => toggle('special')} /> !@#</label>
-            <label><input type="checkbox" checked={pw.excludeLookAlike} onChange={() => toggle('excludeLookAlike')} /> No look-alikes</label>
+            <label><input type="checkbox" checked={pw.excludeLookAlike} onChange={() => toggle('excludeLookAlike')} /> {t('gen.noLookAlikes')}</label>
           </div>
         </div>
       ) : (
         <div style={{ marginTop: 10 }}>
-          <label className="jpb-label" style={{ display: 'block', marginBottom: 6 }}>Words: {pp.words}</label>
+          <label className="jpb-label" style={{ display: 'block', marginBottom: 6 }}>{t('gen.words', { n: pp.words })}</label>
           <input type="range" min={4} max={16} value={pp.words} onChange={(e) => setPp((o) => ({ ...o, words: Number(e.target.value) }))} style={{ width: '100%' }} />
           <div style={{ display: 'flex', gap: 8, marginTop: 8, alignItems: 'center', fontSize: 13 }}>
-            <span>Separator</span>
+            <span>{t('gen.separator')}</span>
             <input className="jpb-input" style={{ width: 60, height: 30 }} maxLength={3} value={pp.separator} onChange={(e) => setPp((o) => ({ ...o, separator: e.target.value }))} />
             <select className="jpb-input" style={{ height: 30, width: 'auto' }} value={pp.wordCase} onChange={(e) => setPp((o) => ({ ...o, wordCase: e.target.value as PassphraseOptions['wordCase'] }))}>
-              <option value="lower">lower</option>
-              <option value="capitalize">Capitalize</option>
-              <option value="upper">UPPER</option>
+              <option value="lower">{t('gen.case.lower')}</option>
+              <option value="capitalize">{t('gen.case.capitalize')}</option>
+              <option value="upper">{t('gen.case.upper')}</option>
             </select>
           </div>
         </div>
@@ -350,7 +391,7 @@ export function PasswordGenerator({ onUse }: { onUse?: (value: string) => void }
 
       {onUse ? (
         <div style={{ marginTop: 12 }}>
-          <Btn variant="primary" block onClick={() => onUse(value)}>Use this</Btn>
+          <Btn variant="primary" block onClick={() => onUse(value)}>{t('gen.useThis')}</Btn>
         </div>
       ) : null}
     </div>
@@ -419,23 +460,23 @@ export function CreateResourceForm({ initial, onCreated, onCancel, compact }: {
 
   return (
     <div className={compact ? '' : 'jpb-card'}>
-      <div className="jpb-h2"><Plus size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />New password</div>
+      <div className="jpb-h2"><Plus size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('create.title')}</div>
 
       <div className="jpb-field" style={{ marginTop: 8 }}>
-        <label className="jpb-label">Name *</label>
-        <input className="jpb-input" value={name} autoFocus onChange={(e) => setName(e.target.value)} placeholder="e.g. GitHub" />
+        <label className="jpb-label">{t('create.name')}</label>
+        <input className="jpb-input" value={name} autoFocus onChange={(e) => setName(e.target.value)} placeholder={t('create.namePlaceholder')} />
       </div>
       <div className="jpb-field">
-        <label className="jpb-label">Username</label>
-        <input className="jpb-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="you@example.com" />
+        <label className="jpb-label">{t('create.username')}</label>
+        <input className="jpb-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder={t('create.usernamePlaceholder')} />
       </div>
       <div className="jpb-field">
-        <label className="jpb-label">Website</label>
-        <input className="jpb-input" value={uri} onChange={(e) => setUri(e.target.value)} placeholder="https://example.com" />
+        <label className="jpb-label">{t('create.website')}</label>
+        <input className="jpb-input" value={uri} onChange={(e) => setUri(e.target.value)} placeholder={t('create.websitePlaceholder')} />
       </div>
 
       <div className="jpb-field">
-        <label className="jpb-label">Password *</label>
+        <label className="jpb-label">{t('create.passwordRequired')}</label>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
           <input
             className="jpb-input"
@@ -443,22 +484,22 @@ export function CreateResourceForm({ initial, onCreated, onCancel, compact }: {
             type={showPw ? 'text' : 'password'}
             value={password}
             onChange={(e) => { setPassword(e.target.value); setPwned(null); }}
-            placeholder="Enter or generate"
+            placeholder={t('create.passwordPlaceholder')}
           />
-          <Btn small variant="ghost" title={showPw ? 'Hide' : 'Show'} onClick={() => setShowPw((s) => !s)}>{showPw ? <EyeOff size={14} /> : <Eye size={14} />}</Btn>
-          <Btn small variant="ghost" title="Generator" onClick={() => setShowGen((s) => !s)}><Dices size={14} /></Btn>
+          <Btn small variant="ghost" title={showPw ? t('detail.hide') : t('detail.show')} onClick={() => setShowPw((s) => !s)}>{showPw ? <EyeOff size={14} /> : <Eye size={14} />}</Btn>
+          <Btn small variant="ghost" title={t('create.generator')} onClick={() => setShowGen((s) => !s)}><Dices size={14} /></Btn>
         </div>
         {password ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 6 }}>
             <span className={`jpb-strength ${strength.cls}`}>{strength.label}</span>
             <span style={{ flex: 1 }} />
-            <Btn small variant="ghost" onClick={check} disabled={checking}><ShieldAlert size={13} /> {checking ? 'Checking…' : 'Breach check'}</Btn>
+            <Btn small variant="ghost" onClick={check} disabled={checking}><ShieldAlert size={13} /> {checking ? t('detail.checking') : t('detail.breachCheck')}</Btn>
           </div>
         ) : null}
         {pwned !== null ? (
-          pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>Breach check unavailable.</div>
-            : pwned === 0 ? <div className="jpb-ok">Not found in known breaches.</div>
-              : <div className="jpb-error">Found in {pwned.toLocaleString()} known breaches — choose another.</div>
+          pwned === -1 ? <div className="jpb-muted" style={{ fontSize: 12 }}>{t('breach.unavailable')}</div>
+            : pwned === 0 ? <div className="jpb-ok">{t('breach.notFound')}</div>
+              : <div className="jpb-error">{t('breach.foundChooseAnother', { count: pwned.toLocaleString() })}</div>
         ) : null}
       </div>
 
@@ -467,14 +508,14 @@ export function CreateResourceForm({ initial, onCreated, onCancel, compact }: {
       ) : null}
 
       <div className="jpb-field">
-        <label className="jpb-label">Description</label>
-        <textarea className="jpb-textarea" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Encrypted with the secret" />
+        <label className="jpb-label">{t('detail.description')}</label>
+        <textarea className="jpb-textarea" value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t('create.descriptionPlaceholder')} />
       </div>
 
       <ErrorMsg text={err} />
       <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
-        <Btn variant="primary" block onClick={submit} disabled={!canSubmit}><Save size={14} /> {busy ? 'Saving…' : 'Save password'}</Btn>
-        {onCancel ? <Btn variant="ghost" onClick={onCancel} title="Cancel"><X size={14} /></Btn> : null}
+        <Btn variant="primary" block onClick={submit} disabled={!canSubmit}><Save size={14} /> {busy ? t('create.saving') : t('create.savePassword')}</Btn>
+        {onCancel ? <Btn variant="ghost" onClick={onCancel} title={t('common.cancel')}><X size={14} /></Btn> : null}
       </div>
     </div>
   );
