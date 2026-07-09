@@ -28,11 +28,21 @@ if (window.__jpbContent) {
 function init(): void {
   const TOP = window.top === window;
 
-  // Announce presence to JPassbolt web pages (the SPA reads this to decide
-  // whether to show an "install the extension" prompt). Harmless elsewhere.
+  // Announce presence to JPassbolt web pages (the skeleton reads this to decide
+  // whether to show "install the extension"). The marker MUST NOT depend on a
+  // throwable chrome API: after a rebuild + reload-unpacked the chrome bridge can
+  // be momentarily invalidated and chrome.runtime.getManifest() THROWS — which
+  // previously left the page stuck on "please install" even though the extension
+  // was installed. So stamp a STATIC attribute + a stable class (official Passbolt
+  // uses a `passboltplugin` class marker) unconditionally first, then append the
+  // real version best-effort in a separate try so a failure can't erase the marker.
+  try {
+    document.documentElement.setAttribute('data-jpassbolt-extension', '1');
+    document.documentElement.classList.add('jpassbolt-extension');
+  } catch { /* not a normal DOM document */ }
   try {
     document.documentElement.setAttribute('data-jpassbolt-extension', chrome.runtime.getManifest().version);
-  } catch { /* not a normal DOM document */ }
+  } catch { /* chrome bridge momentarily unavailable — the static marker above stands */ }
 
   // --- exclusion gate (fail-closed until status is known) ------------------
   // No listener acts until `ready` is set: before we know the configured server
@@ -144,8 +154,12 @@ function init(): void {
   // submit-LIKE control while a password field actually holds a value, so we
   // don't ship the plaintext to the background on unrelated button clicks.
   document.addEventListener('click', (e) => {
-    const t = e.target as HTMLElement | null;
-    if (!t) return;
+    // e.target may be a non-Element (text node, document, or a foreign node in a
+    // complex page like webmail) — those have no .closest(). Guard at runtime
+    // exactly like the keydown handler above; the `as HTMLElement` cast is a
+    // compile-time lie that crashed on real sites ("u.closest is not a function").
+    const t = e.target;
+    if (!(t instanceof Element)) return;
     const btn = t.closest<HTMLElement>('button, input[type="submit"], [role="button"]');
     if (!btn) return;
     const looksSubmit = btn.getAttribute('type') === 'submit'

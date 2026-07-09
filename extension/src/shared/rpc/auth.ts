@@ -26,8 +26,14 @@ export type AuthReq =
   // IMPORT_KEY, which replaces the account key immediately).
   | { type: 'SETUP_IMPORT_KEY'; armoredPrivateKey: string }
   // Promotes the staged pair to the account keys and drops the old session
-  // (JWT/user/account). Call ONLY after setup/recover complete succeeded.
-  | { type: 'SETUP_COMMIT' }
+  // (JWT/user). Call ONLY after setup/recover complete succeeded. `account` is
+  // the flow-validated identity (from setup/recover start): official Passbolt
+  // creates the account entity at completion — not at first sign-in — so the
+  // unlock screen can greet the user (name + email) before any UNLOCK ran.
+  | {
+      type: 'SETUP_COMMIT';
+      account?: { userId: string; username: string; fullName: string };
+    }
   // Without armoredKey: info about the account's own public key.
   | { type: 'KEY_INFO'; armoredKey?: string }
   // Login-time MFA challenge; the pending JWT lives ONLY in background memory.

@@ -49,6 +49,7 @@ import type { HandlerMap } from '../registry';
 
 type SetupGenerateKeyReq = Extract<Req, { type: 'SETUP_GENERATE_KEY' }>;
 type SetupImportKeyReq = Extract<Req, { type: 'SETUP_IMPORT_KEY' }>;
+type SetupCommitReq = Extract<Req, { type: 'SETUP_COMMIT' }>;
 type MfaVerifyReq = Extract<Req, { type: 'MFA_VERIFY' }>;
 type UnlockReq = Extract<Req, { type: 'UNLOCK' }>;
 
@@ -412,13 +413,41 @@ async function setupImportKeyHandler(req: SetupImportKeyReq): Promise<{
  * the pair and drop the old credentials — the subsequent UNLOCK must run a
  * fresh GpgAuth with THIS key, never reuse a JWT minted for the previous one.
  */
-async function setupCommitHandler(): Promise<StatusResult> {
+async function setupCommitHandler(req: SetupCommitReq): Promise<StatusResult> {
   const stagedPrivate = await get<string>(K.stagedPrivateKey);
   const stagedPublic = await get<string>(K.stagedPublicKey);
   if (!stagedPrivate || !stagedPublic) throw new Error(t('bg.noPrivateKeyImported'));
   lock();
   await set({ [K.privateKey]: stagedPrivate, [K.publicKey]: stagedPublic });
   await del([K.jwt, K.user, K.account, K.stagedPrivateKey, K.stagedPublicKey]);
+  // Persist the flow-validated identity NOW (official parity: the account
+  // entity exists from setup/recover completion, not from the first sign-in),
+  // so the unlock screen in any tab greets the user by name/email even before
+  // the first UNLOCK succeeds. finalizeSession later overwrites this with the
+  // server-authoritative /users/me.json data. Entirely best-effort: the staged
+  // slots are already consumed above, so a throw here (readKey/set) would leave
+  // the promoted keys uncommittable on retry — the greet must NEVER be able to
+  // fail the commit, so the whole block is swallowed.
+  if (req.account?.username) {
+    try {
+      let fingerprint = '';
+      try {
+        fingerprint = (await openpgp.readKey({ armoredKey: stagedPublic })).getFingerprint();
+      } catch {
+        /* unparseable staged public key — greet without a fingerprint */
+      }
+      const account: AccountInfo = {
+        serverUrl: (await get<string>(K.serverUrl)) ?? '',
+        username: req.account.username,
+        fullName: req.account.fullName || req.account.username,
+        fingerprint,
+        userId: req.account.userId,
+      };
+      await set({ [K.account]: account });
+    } catch {
+      /* greet is cosmetic — the next successful unlock writes the real account */
+    }
+  }
   void broadcastSessionState();
   return currentStatus();
 }

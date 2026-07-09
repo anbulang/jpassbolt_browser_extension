@@ -50,12 +50,13 @@ export const en: Dict = {
 
   // unlock form
   'unlock.title': 'Unlock your vault',
-  'unlock.signedInAs': 'Signed in as {{username}}',
   'unlock.enterPassphrase': 'Enter your passphrase to unlock.',
   'unlock.passphrase': 'Passphrase',
-  'unlock.unlocking': 'Unlocking…',
-  'unlock.unlock': 'Unlock',
-  'unlock.useDifferentAccount': 'Use a different account',
+  'unlock.signingIn': 'Signing in…',
+  'unlock.signIn': 'Sign in',
+  'unlock.lostPassphrase': 'Help, I lost my passphrase.',
+  'unlock.recoverSent': 'Recovery email sent — check your mailbox.',
+  'unlock.switchAccount': 'Or switch to another account.',
 
   // quickaccess / vault list
   'vault.searchPlaceholder': 'Search vault…',
@@ -273,12 +274,13 @@ export const zh: Dict = {
 
   // unlock form
   'unlock.title': '解锁你的密码库',
-  'unlock.signedInAs': '已登录为 {{username}}',
   'unlock.enterPassphrase': '输入口令以解锁。',
   'unlock.passphrase': '口令',
-  'unlock.unlocking': '正在解锁…',
-  'unlock.unlock': '解锁',
-  'unlock.useDifferentAccount': '使用其他账户',
+  'unlock.signingIn': '正在登录…',
+  'unlock.signIn': '登录',
+  'unlock.lostPassphrase': '忘记口令？发送恢复邮件',
+  'unlock.recoverSent': '恢复邮件已发送，请查收邮箱。',
+  'unlock.switchAccount': '或改用其他账户',
 
   // quickaccess / vault list
   'vault.searchPlaceholder': '搜索密码库…',

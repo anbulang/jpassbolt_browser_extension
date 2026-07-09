@@ -53,6 +53,7 @@ import {
   KeyGen,
   PP_LABEL,
   Stepper,
+  accountIdentity,
   downloadRecoveryKit,
   formatFingerprint,
   fullName,
@@ -228,8 +229,10 @@ export default function SetupPage() {
         // Account is activated server-side — NOW promote the staged pair to
         // the account keys (replacing any previous account on this browser and
         // dropping its session). Before this point the flow is abandonable
-        // without side effects on an existing account.
-        await rpc({ type: 'SETUP_COMMIT' });
+        // without side effects on an existing account. The invite-validated
+        // identity rides along so the unlock screen can greet this user even
+        // before the UNLOCK below succeeds.
+        await rpc({ type: 'SETUP_COMMIT', account: accountIdentity(user) });
         setCommitted(true);
       }
       // setup/complete activates the account but issues NO JWT (PHP parity):

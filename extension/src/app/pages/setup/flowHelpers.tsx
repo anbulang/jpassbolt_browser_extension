@@ -65,6 +65,25 @@ export function fullName(user: User | null, fallbackKey = 'app.auth.setup.newMem
   return [f, l].filter(Boolean).join(' ') || user?.username || t(fallbackKey);
 }
 
+/**
+ * SETUP_COMMIT `account` payload from the flow-validated user (setup/recover
+ * start response). Unlike fullName() this never substitutes localized
+ * placeholder text — a missing profile falls back to the raw username, since
+ * the value is PERSISTED as the account identity, not just displayed.
+ */
+export function accountIdentity(
+  user: User | null,
+): { userId: string; username: string; fullName: string } | undefined {
+  if (!user?.username) return undefined;
+  const f = user.profile?.first_name?.trim() ?? '';
+  const l = user.profile?.last_name?.trim() ?? '';
+  return {
+    userId: user.id,
+    username: user.username,
+    fullName: [f, l].filter(Boolean).join(' ') || user.username,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Stepper
 // ---------------------------------------------------------------------------

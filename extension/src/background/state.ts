@@ -39,6 +39,10 @@ export const K = {
   jwt: 'jwt',
   user: 'user',
   account: 'account',
+  // One-shot marker for the legacy account-identity backfill (index.ts): the
+  // heal must run at most once per install, or it would also "heal" states
+  // where K.account was deleted ON PURPOSE (SET_SERVER origin change).
+  accountBackfillDone: 'account_backfill_done',
 } as const;
 
 export async function get<T>(key: string): Promise<T | undefined> {

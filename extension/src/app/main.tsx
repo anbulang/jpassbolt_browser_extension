@@ -80,8 +80,16 @@ function EmbedRefusal({ origin }: { origin: string }) {
 // ---- host-path → hash-route mapping ----------------------------------------
 /** '/app/users' → '/users'; '/setup/recover/…' → '/recover/…'; '/' | '/app' → '/'. */
 function mapHostPathname(p: string): string {
+  // Recover links: {domain}/setup/recover/start/{userId}/{tokenId} (new shape) and
+  // the legacy {domain}/setup/recover/{userId}/{tokenId}. Strip the whole prefix so
+  // both collapse to two path segments matching the '/recover/:userId/:tokenId' route
+  // — '/recover/start/U/T' (3 segments) would fall through to Navigate('/') and blank.
+  if (p.startsWith('/setup/recover/start/')) return '/recover/' + p.slice('/setup/recover/start/'.length);
   if (p.startsWith('/setup/recover/')) return '/recover/' + p.slice('/setup/recover/'.length);
+  // Setup-invite links: {domain}/setup/start/{userId}/{tokenId} (new) and legacy
+  // /setup/install/{userId}/{tokenId} → '/setup/:userId/:tokenId'.
   if (p.startsWith('/setup/install/')) return '/setup/' + p.slice('/setup/install/'.length);
+  if (p.startsWith('/setup/start/')) return '/setup/' + p.slice('/setup/start/'.length);
   if (p.startsWith('/setup/')) return p;
   if (p === '/recover' || p.startsWith('/recover/')) return p;
   if (p === '/app' || p === '/app/') return '/';

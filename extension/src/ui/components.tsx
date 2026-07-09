@@ -147,6 +147,11 @@ export function UnlockForm({ account, onDone, onLogout }: {
   const [pass, setPass] = useState('');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [recoverSent, setRecoverSent] = useState(false);
+  // Official state-D login card shows WHO is signing in: initials avatar +
+  // full name + email, not just a "signed in as" line.
+  const initials = (account?.fullName || account?.username || '?')
+    .split(/[\s.@_-]+/).map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
   const submit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     setErr(null); setBusy(true);
@@ -154,18 +159,45 @@ export function UnlockForm({ account, onDone, onLogout }: {
     catch (e2) { setErr(e2 instanceof Error ? e2.message : String(e2)); }
     finally { setBusy(false); }
   };
+  // "Help, I lost my passphrase." (official parity): self-service account
+  // recover — fire the same enumeration-safe endpoint the server's state-A
+  // email triage uses, for the account we already know, then point the user
+  // at their mailbox. Flip the flash first: the endpoint always answers
+  // success by design, so there is nothing to conditionally report.
+  const lostPassphrase = () => {
+    if (!account || recoverSent) return;
+    setRecoverSent(true);
+    void fetch(`${account.serverUrl}/api/users/recover.json`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ username: account.username }),
+    }).catch(() => undefined);
+  };
   return (
     <form className="jpb-card" onSubmit={submit}>
       <div className="jpb-h2"><Lock size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('unlock.title')}</div>
-      <p className="jpb-muted">{account ? t('unlock.signedInAs', { username: account.username }) : t('unlock.enterPassphrase')}</p>
+      {account ? (
+        <div className="jpb-account">
+          <div className="jpb-avatar">{initials}</div>
+          <div>
+            <div className="an">{account.fullName}</div>
+            <div className="ae">{account.username}</div>
+          </div>
+        </div>
+      ) : (
+        <p className="jpb-muted">{t('unlock.enterPassphrase')}</p>
+      )}
       <div className="jpb-field" style={{ marginTop: 12 }}>
         <label className="jpb-label">{t('unlock.passphrase')}</label>
         <input className="jpb-input" type="password" autoFocus value={pass} onChange={(e) => setPass(e.target.value)} />
       </div>
       <ErrorMsg text={err} />
-      <Btn type="submit" variant="primary" block disabled={busy || !pass}>{busy ? t('unlock.unlocking') : t('unlock.unlock')}</Btn>
-      <div style={{ textAlign: 'center', marginTop: 10 }}>
-        <button type="button" className="jpb-link" onClick={onLogout}>{t('unlock.useDifferentAccount')}</button>
+      <Btn type="submit" variant="primary" block disabled={busy || !pass}>{busy ? t('unlock.signingIn') : t('unlock.signIn')}</Btn>
+      <div style={{ textAlign: 'center', marginTop: 10, display: 'grid', gap: 6 }}>
+        {recoverSent
+          ? <span className="jpb-muted">{t('unlock.recoverSent')}</span>
+          : account && <button type="button" className="jpb-link" onClick={lostPassphrase}>{t('unlock.lostPassphrase')}</button>}
+        <button type="button" className="jpb-link" onClick={onLogout}>{t('unlock.switchAccount')}</button>
       </div>
     </form>
   );
