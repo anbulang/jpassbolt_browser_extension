@@ -183,6 +183,9 @@ function buildAccount(serverUrl: string, user: RawUser, fingerprint: string): Ac
     fullName: fullName || user.username,
     fingerprint,
     userId: user.id,
+    // Server-authoritative (finalizeSession, after a real sign-in): may drive
+    // network actions. The cosmetic greet writers leave verified falsy.
+    verified: true,
   };
 }
 

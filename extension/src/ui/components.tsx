@@ -165,7 +165,10 @@ export function UnlockForm({ account, onDone, onLogout }: {
   // at their mailbox. Flip the flash first: the endpoint always answers
   // success by design, so there is nothing to conditionally report.
   const lostPassphrase = () => {
-    if (!account || recoverSent) return;
+    // Only a server-VERIFIED account may drive this POST. An unverified greet's
+    // serverUrl is an unverified guess — possibly an attacker origin adopted via
+    // a guest link — so POSTing the username there would disclose the email to it.
+    if (!account?.verified || recoverSent) return;
     setRecoverSent(true);
     void fetch(`${account.serverUrl}/api/users/recover.json`, {
       method: 'POST',
@@ -196,7 +199,7 @@ export function UnlockForm({ account, onDone, onLogout }: {
       <div style={{ textAlign: 'center', marginTop: 10, display: 'grid', gap: 6 }}>
         {recoverSent
           ? <span className="jpb-muted">{t('unlock.recoverSent')}</span>
-          : account && <button type="button" className="jpb-link" onClick={lostPassphrase}>{t('unlock.lostPassphrase')}</button>}
+          : account?.verified && <button type="button" className="jpb-link" onClick={lostPassphrase}>{t('unlock.lostPassphrase')}</button>}
         <button type="button" className="jpb-link" onClick={onLogout}>{t('unlock.switchAccount')}</button>
       </div>
     </form>

@@ -18,12 +18,20 @@ import { rpc } from '../shared/messages';
 const APP_PATH = /^\/(app(\/.*)?)?$/;
 
 /**
- * Guest flows served by the server skeleton: '/setup/...' (invite + recover
- * links) and '/recover...'. These take over even BEFORE an account exists —
- * the whole point of setup is that there is no account yet. The extension-side
- * guest routes render them (app/routes.tsx); app/main.tsx maps the pathname.
+ * Guest links served by the server skeleton, matched with the SAME two-UUID
+ * shape official Passbolt requires (parse{Setup,Recover}UrlService) before it
+ * will act on a URL:
+ *   setup invite  /setup/(install|start)/{uuid}/{uuid}
+ *   recover       /setup/recover(/start)?/{uuid}/{uuid}
+ * The old `/^\/(setup\/.+|recover(\/.*)?)$/` matched a bare `/recover` or any
+ * `/setup/x` with NO token — which let ANY website with such a path trigger the
+ * cross-origin server adoption below (drive-by trusted-server hijack). The token
+ * pair is the trust anchor, so it MUST actually be present before we act.
  */
-const GUEST_PATH = /^\/(setup\/.+|recover(\/.*)?)$/;
+const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+const GUEST_PATH = new RegExp(
+  `^/setup/(?:recover/start|recover|start|install)/${UUID}/${UUID}/?$`,
+);
 
 /**
  * Sign-in triage, official ParseAuthUrlService shape (`^{domain}/auth/login/?…`).
@@ -62,6 +70,14 @@ export async function maybeBootstrapApp(): Promise<void> {
     let currentOrigin = '';
     try { currentOrigin = status.serverUrl ? new URL(status.serverUrl).origin : ''; } catch { /* ignore */ }
     if (currentOrigin !== location.origin) {
+      // Adopting a NEW origin tears the existing session down and repoints the
+      // trusted server (SET_SERVER). Only safe on a device with NO account yet —
+      // the genuine setup/recover target. A device that already has an account
+      // (phase locked/unlocked) must NEVER be silently repointed by a guest page
+      // on a foreign origin: that is a drive-by session teardown / trusted-server
+      // hijack. Refuse to take over cross-origin then — a real server move is
+      // handled by the deliberate ServerForm consent step, not a page visit.
+      if (status.phase === 'locked' || status.phase === 'unlocked') return;
       try { await rpc({ type: 'SET_SERVER', serverUrl: location.origin }); } catch { return; }
     }
     mount();

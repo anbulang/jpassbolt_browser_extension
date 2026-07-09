@@ -20,6 +20,14 @@ export interface AccountInfo {
   fullName: string;
   fingerprint: string;
   userId: string;
+  /**
+   * True ONLY when written from a successful, server-authoritative sign-in
+   * (finalizeSession). The cosmetic pre-unlock greet writers — IMPORT_KEY,
+   * SETUP_COMMIT, the cold-start backfill — leave it falsy: their serverUrl and
+   * identity are unverified guesses safe to DISPLAY but never to drive a network
+   * action (e.g. the lost-passphrase recover POST to account.serverUrl).
+   */
+  verified?: boolean;
 }
 
 export interface VaultItem {

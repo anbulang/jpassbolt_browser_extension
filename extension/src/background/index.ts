@@ -112,6 +112,14 @@ void (async () => {
       userId: '',
     };
     await set({ [K.account]: account });
+    // Post-write TOCTOU guard: a LOGOUT deleting the private key could have
+    // interleaved between the re-check above and this write (both awaits yield).
+    // If the key is now gone, undo the orphaned greet so no identity ghost
+    // outlives the logout.
+    if (!(await get<string>(K.privateKey))) {
+      await del([K.account]);
+      return;
+    }
     void broadcastSessionState();
   } catch {
     /* best-effort healing — never block worker startup */
@@ -382,7 +390,10 @@ interface RawUser {
 function buildAccount(serverUrl: string, user: RawUser, fingerprint: string): AccountInfo {
   const p = user.profile;
   const fullName = p ? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() : user.username;
-  return { serverUrl, username: user.username, fullName: fullName || user.username, fingerprint, userId: user.id };
+  // verified: built from the server-authoritative /users/me.json after a real
+  // sign-in, so it may drive network actions (lost-passphrase POST) — unlike the
+  // cosmetic greet writers, which leave verified falsy.
+  return { serverUrl, username: user.username, fullName: fullName || user.username, fingerprint, userId: user.id, verified: true };
 }
 
 /**
@@ -446,18 +457,25 @@ async function importKey(armoredPrivateKey: string): Promise<StatusResult> {
   // Best-effort identity from the key's primary user ID ("Name <email>") so
   // the unlock screen can greet the user before the first successful UNLOCK
   // (which replaces this with the server-authoritative account). userId stays
-  // empty — every consumer reads it through a truthiness check.
-  const id = await identityFromKey(key);
-  if (id) {
-    const serverUrl = (await get<string>(K.serverUrl)) ?? '';
-    const account: AccountInfo = {
-      serverUrl,
-      username: id.email,
-      fullName: id.name || id.email,
-      fingerprint: key.getFingerprint(),
-      userId: '',
-    };
-    await set({ [K.account]: account });
+  // empty and verified falsy — every consumer treats it as display-only.
+  // Fully swallowed (like setupCommitHandler's sibling block): the key is ALREADY
+  // persisted above, so a throw here must never reject importKey and strand the
+  // user on an "import failed" screen for a key that actually imported fine.
+  try {
+    const id = await identityFromKey(key);
+    if (id) {
+      const serverUrl = (await get<string>(K.serverUrl)) ?? '';
+      const account: AccountInfo = {
+        serverUrl,
+        username: id.email,
+        fullName: id.name || id.email,
+        fingerprint: key.getFingerprint(),
+        userId: '',
+      };
+      await set({ [K.account]: account });
+    }
+  } catch {
+    /* greet is cosmetic — the next successful unlock writes the real account */
   }
   void broadcastSessionState();
   return currentStatus();
