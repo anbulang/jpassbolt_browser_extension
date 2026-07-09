@@ -18,12 +18,30 @@ import { rpc } from '../shared/messages';
 const APP_PATH = /^\/(app(\/.*)?)?$/;
 
 /**
- * Guest flows served by the server skeleton: '/setup/...' (invite + recover
- * links) and '/recover...'. These take over even BEFORE an account exists —
- * the whole point of setup is that there is no account yet. The extension-side
- * guest routes render them (app/routes.tsx); app/main.tsx maps the pathname.
+ * Guest links served by the server skeleton, matched with the SAME two-UUID
+ * shape official Passbolt requires (parse{Setup,Recover}UrlService) before it
+ * will act on a URL:
+ *   setup invite  /setup/(install|start)/{uuid}/{uuid}
+ *   recover       /setup/recover(/start)?/{uuid}/{uuid}
+ * The old `/^\/(setup\/.+|recover(\/.*)?)$/` matched a bare `/recover` or any
+ * `/setup/x` with NO token — which let ANY website with such a path trigger the
+ * cross-origin server adoption below (drive-by trusted-server hijack). The token
+ * pair is the trust anchor, so it MUST actually be present before we act.
  */
-const GUEST_PATH = /^\/(setup\/.+|recover(\/.*)?)$/;
+const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
+const GUEST_PATH = new RegExp(
+  `^/setup/(?:recover/start|recover|start|install)/${UUID}/${UUID}/?$`,
+);
+
+/**
+ * Sign-in triage, official ParseAuthUrlService shape (`^{domain}/auth/login/?…`).
+ * Unlike guest paths, this behaves like an APP path: it only takes over once a
+ * local account exists (state D — greet the returning user, ask passphrase). If
+ * NO account exists yet, we deliberately DON'T attach, so the server-rendered
+ * "enter your email" page (state A) stays visible — matching upstream, where
+ * AuthBootstrap requires GetActiveAccountService to succeed.
+ */
+const AUTH_PATH = /^\/auth\/login\/?$/;
 
 let mounted = false;
 
@@ -37,19 +55,44 @@ export async function maybeBootstrapApp(): Promise<void> {
 
   let status;
   try { status = await rpc({ type: 'GET_STATUS' }); } catch { return; }
-  if (!status.serverUrl) return;
 
+  // Guest flows (setup / recover) PROVISION a new device: there is normally no
+  // server configured yet (phase 'no_server'), or one pointing at a different
+  // origin (e.g. :8080 while this recover link is :8090). Official Passbolt's
+  // Recover/SetupBootstrap attaches on the token URL with NO preconfigured-server
+  // precondition and infers the server from the page origin. So for guest paths
+  // we adopt THIS page's origin as the server (only when it differs — SET_SERVER
+  // tears down any session bound to a different origin) and mount regardless of
+  // the prior serverUrl. The one-time token in the URL is the trust anchor, same
+  // as upstream. Without this, a fresh/mis-pointed extension stays stuck on the
+  // skeleton's "Extension detected" card because the mount below never runs.
+  if (GUEST_PATH.test(location.pathname)) {
+    let currentOrigin = '';
+    try { currentOrigin = status.serverUrl ? new URL(status.serverUrl).origin : ''; } catch { /* ignore */ }
+    if (currentOrigin !== location.origin) {
+      // Adopting a NEW origin tears the existing session down and repoints the
+      // trusted server (SET_SERVER). Only safe on a device with NO account yet —
+      // the genuine setup/recover target. A device that already has an account
+      // (phase locked/unlocked) must NEVER be silently repointed by a guest page
+      // on a foreign origin: that is a drive-by session teardown / trusted-server
+      // hijack. Refuse to take over cross-origin then — a real server move is
+      // handled by the deliberate ServerForm consent step, not a page visit.
+      if (status.phase === 'locked' || status.phase === 'unlocked') return;
+      try { await rpc({ type: 'SET_SERVER', serverUrl: location.origin }); } catch { return; }
+    }
+    mount();
+    return;
+  }
+
+  // App / auth paths: only ever take over an EXISTING account on the SAME origin.
+  // Before an account exists the skeleton's own guidance (install / enter-email
+  // state A) must stay visible — an empty iframe would just hide it.
+  if (!status.serverUrl) return;
   let serverOrigin: string;
   try { serverOrigin = new URL(status.serverUrl).origin; } catch { return; }
   if (location.origin !== serverOrigin) return;
-  const isGuestPath = GUEST_PATH.test(location.pathname);
-  if (!isGuestPath && !APP_PATH.test(location.pathname)) return;
-
-  // App paths: only take over once an account exists (locked/unlocked). Before
-  // setup the skeleton page's own "install / configure the extension" guidance
-  // must stay visible — an empty iframe would just hide it. Guest paths
-  // (setup/recovery) take over regardless: they exist to CREATE the account.
-  if (!isGuestPath && status.phase !== 'locked' && status.phase !== 'unlocked') return;
+  if (!AUTH_PATH.test(location.pathname) && !APP_PATH.test(location.pathname)) return;
+  if (status.phase !== 'locked' && status.phase !== 'unlocked') return;
 
   mount();
 }

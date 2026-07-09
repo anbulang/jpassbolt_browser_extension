@@ -77,6 +77,55 @@ void chrome.storage.local.remove('app_origin').catch(() => undefined);
 // the rehydrate found nothing the UIs fall back to the lock screen right away.
 void broadcastSessionState();
 
+// ONE-SHOT healing for pre-fix storage states: an account key without a
+// persisted AccountInfo (SETUP_COMMIT / IMPORT_KEY used to DELETE 'account',
+// and only a successful login wrote it back — so a browser that committed a
+// recovery but never unlocked showed a greet-less passphrase screen forever).
+// Backfill a best-effort identity from the stored PUBLIC key's user ID; the
+// next successful unlock replaces it with server-authoritative data. The
+// accountBackfillDone marker limits this to a single attempt per install:
+// key-present-account-absent is ALSO the deliberate outcome of SET_SERVER on
+// an origin change, and repeatedly "healing" that would resurrect the deleted
+// identity stamped with the NEW server's URL (and hand the old email to the
+// lost-passphrase recover POST there).
+void (async () => {
+  try {
+    if (await get<boolean>(K.accountBackfillDone)) return;
+    await set({ [K.accountBackfillDone]: true });
+    if (await get<AccountInfo>(K.account)) return;
+    if (!(await get<string>(K.privateKey))) return;
+    const armoredPub = await get<string>(K.publicKey);
+    if (!armoredPub) return;
+    const pub = await openpgp.readKey({ armoredKey: armoredPub });
+    const id = await identityFromKey(pub);
+    if (!id) return;
+    // Re-check just before writing: a concurrent UNLOCK must win (its account
+    // is server-authoritative) and a concurrent LOGOUT must win too — it
+    // deletes the PRIVATE key, and a greet without an unlockable key behind it
+    // would be a post-logout identity ghost.
+    if (!(await get<string>(K.privateKey)) || (await get<AccountInfo>(K.account))) return;
+    const account: AccountInfo = {
+      serverUrl: (await get<string>(K.serverUrl)) ?? '',
+      username: id.email,
+      fullName: id.name || id.email,
+      fingerprint: pub.getFingerprint(),
+      userId: '',
+    };
+    await set({ [K.account]: account });
+    // Post-write TOCTOU guard: a LOGOUT deleting the private key could have
+    // interleaved between the re-check above and this write (both awaits yield).
+    // If the key is now gone, undo the orphaned greet so no identity ghost
+    // outlives the logout.
+    if (!(await get<string>(K.privateKey))) {
+      await del([K.account]);
+      return;
+    }
+    void broadcastSessionState();
+  } catch {
+    /* best-effort healing — never block worker startup */
+  }
+})();
+
 const CLIPBOARD_CLEAR_MS = 30_000;
 
 /**
@@ -341,7 +390,44 @@ interface RawUser {
 function buildAccount(serverUrl: string, user: RawUser, fingerprint: string): AccountInfo {
   const p = user.profile;
   const fullName = p ? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() : user.username;
-  return { serverUrl, username: user.username, fullName: fullName || user.username, fingerprint, userId: user.id };
+  // verified: built from the server-authoritative /users/me.json after a real
+  // sign-in, so it may drive network actions (lost-passphrase POST) — unlike the
+  // cosmetic greet writers, which leave verified falsy.
+  return { serverUrl, username: user.username, fullName: fullName || user.username, fingerprint, userId: user.id, verified: true };
+}
+
+/**
+ * Display identity from a key's user ID ("Name <email>"). Prefers the
+ * self-certified PRIMARY user (getPrimaryUser) — getUserIDs() is packet order,
+ * which on multi-UID keys can surface a stale address first.
+ */
+async function identityFromKey(key: openpgp.Key): Promise<{ email: string; name: string } | null> {
+  let uid = '';
+  try {
+    uid = (await key.getPrimaryUser()).user.userID?.userID ?? '';
+  } catch {
+    /* no valid self-certification — fall back to packet order below */
+  }
+  if (!uid) uid = key.getUserIDs()[0] ?? '';
+  return parseUserID(uid);
+}
+
+/**
+ * Parse "Name <email>" WITHOUT a lazy-quantifier regex: a pathological
+ * all-whitespace user ID makes `/(.*?)\s*</` backtrack quadratically and stall
+ * the worker (the UID is user-controlled for a pasted IMPORT_KEY). indexOf
+ * scanning is linear. Falls back to treating a bare "email-looking" UID as the
+ * email (its own single, non-backtracking char-class test).
+ */
+function parseUserID(uid: string): { email: string; name: string } | null {
+  const lt = uid.lastIndexOf('<');
+  const gt = lt >= 0 ? uid.indexOf('>', lt) : -1;
+  if (lt >= 0 && gt > lt) {
+    const email = uid.slice(lt + 1, gt).trim();
+    if (email) return { email, name: uid.slice(0, lt).trim() };
+  }
+  const bare = uid.trim();
+  return /^[^\s<>@]+@[^\s<>@]+$/.test(bare) ? { email: bare, name: '' } : null;
 }
 
 /** Validate + persist the armored private key (must be passphrase-protected). */
@@ -368,6 +454,29 @@ async function importKey(armoredPrivateKey: string): Promise<StatusResult> {
     [K.publicKey]: key.toPublic().armor(),
   });
   await del([K.jwt, K.user, K.account]);
+  // Best-effort identity from the key's primary user ID ("Name <email>") so
+  // the unlock screen can greet the user before the first successful UNLOCK
+  // (which replaces this with the server-authoritative account). userId stays
+  // empty and verified falsy — every consumer treats it as display-only.
+  // Fully swallowed (like setupCommitHandler's sibling block): the key is ALREADY
+  // persisted above, so a throw here must never reject importKey and strand the
+  // user on an "import failed" screen for a key that actually imported fine.
+  try {
+    const id = await identityFromKey(key);
+    if (id) {
+      const serverUrl = (await get<string>(K.serverUrl)) ?? '';
+      const account: AccountInfo = {
+        serverUrl,
+        username: id.email,
+        fullName: id.name || id.email,
+        fingerprint: key.getFingerprint(),
+        userId: '',
+      };
+      await set({ [K.account]: account });
+    }
+  } catch {
+    /* greet is cosmetic — the next successful unlock writes the real account */
+  }
   void broadcastSessionState();
   return currentStatus();
 }
@@ -666,4 +775,27 @@ chrome.runtime.onMessage.addListener((req: Req, sender, sendResponse) => {
       sendResponse({ ok: false, error: e instanceof Error ? e.message : String(e) } as RpcResult<unknown>),
     );
   return true; // keep the message channel open for the async response
+});
+
+// ---------------------------------------------------------------------------
+// Reload our app pages on install / update (official parity:
+// mustReloadOnExtensionUpdate). After a rebuild + "reload unpacked" (or a
+// store update) every already-open tab still runs the OLD content script whose
+// chrome bridge is invalidated — the skeleton page then reports "extension not
+// installed" even though it is. Reloading the tabs on the configured server
+// origin re-injects a fresh content script so detection and the iframe
+// takeover work immediately, no manual refresh needed.
+// ---------------------------------------------------------------------------
+chrome.runtime.onInstalled.addListener(() => {
+  void (async () => {
+    try {
+      const serverUrl = await get<string>(K.serverUrl);
+      if (!serverUrl) return;
+      const origin = new URL(serverUrl).origin;
+      const tabs = await chrome.tabs.query({ url: `${origin}/*` });
+      for (const tab of tabs) {
+        if (tab.id !== undefined) void chrome.tabs.reload(tab.id).catch(() => undefined);
+      }
+    } catch { /* no server configured / invalid URL — nothing to reload */ }
+  })();
 });

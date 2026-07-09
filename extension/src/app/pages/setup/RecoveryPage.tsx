@@ -52,6 +52,7 @@ import { describeApiError } from '../../lib/errors';
 import {
   KeyFileButton,
   Stepper,
+  accountIdentity,
   formatFingerprint,
   fullName,
 } from './flowHelpers';
@@ -188,8 +189,10 @@ export default function RecoveryPage() {
       if (!committed) {
         // Server accepted the recovery — NOW promote the staged backup to the
         // account key (replacing any previous account on this browser and
-        // dropping its session).
-        await rpc({ type: 'SETUP_COMMIT' });
+        // dropping its session). The link-validated identity rides along so
+        // the unlock screen greets this user even before the UNLOCK below
+        // succeeds (e.g. a mistyped passphrase, or another tab meanwhile).
+        await rpc({ type: 'SETUP_COMMIT', account: accountIdentity(user) });
         setCommitted(true);
       }
       // recover/complete issues NO JWT (PHP parity) — UNLOCK runs the real
