@@ -38,6 +38,7 @@ import {
 } from '../../services/users';
 import { getRoles } from '../../services/settings';
 import { getMe, avatarUrl } from '../../services/profile';
+import { splitFullName, joinName } from '../../../shared/names';
 import { ApiError } from '../../lib/api';
 import { describeApiError } from '../../lib/errors';
 import { useToast } from '../../lib/toast';
@@ -166,8 +167,7 @@ export default function UsersPage() {
   const openInvite = useCallback(() => {
     setFormError(null);
     setForm({
-      first_name: '',
-      last_name: '',
+      name: '',
       username: '',
       role_id: defaultRoleId,
       disabled: false,
@@ -180,8 +180,7 @@ export default function UsersPage() {
     setFormError(null);
     setEditTarget(user);
     setForm({
-      first_name: user.profile?.first_name ?? '',
-      last_name: user.profile?.last_name ?? '',
+      name: joinName(user.profile?.first_name, user.profile?.last_name),
       username: user.username,
       role_id: user.role_id,
       disabled: !!user.disabled,
@@ -209,15 +208,21 @@ export default function UsersPage() {
         setFormError(tu('form.roleRequired'));
         return;
       }
+      const profile = splitFullName(form.name);
+      if (!profile.first_name || !profile.last_name) {
+        setFormError(tu('form.nameRequired'));
+        return;
+      }
+      if (profile.first_name.length > 255 || profile.last_name.length > 255) {
+        setFormError(tu('form.nameTooLong'));
+        return;
+      }
       setSaving(true);
       setFormError(null);
       const req: UserCreateRequest = {
         username: form.username.trim(),
         role_id: form.role_id,
-        profile: {
-          first_name: form.first_name.trim(),
-          last_name: form.last_name.trim(),
-        },
+        profile,
       };
       try {
         await createUser(req);
@@ -238,6 +243,15 @@ export default function UsersPage() {
     async (e: FormEvent) => {
       e.preventDefault();
       if (!form || !editTarget) return;
+      const profile = splitFullName(form.name);
+      if (!profile.first_name || !profile.last_name) {
+        setFormError(tu('form.nameRequired'));
+        return;
+      }
+      if (profile.first_name.length > 255 || profile.last_name.length > 255) {
+        setFormError(tu('form.nameTooLong'));
+        return;
+      }
       setSaving(true);
       setFormError(null);
 
@@ -245,10 +259,7 @@ export default function UsersPage() {
         role_id: form.role_id,
         // Disabled toggles a timestamp on, null to re-enable.
         disabled: form.disabled ? (editTarget.disabled ?? new Date().toISOString()) : null,
-        profile: {
-          first_name: form.first_name.trim(),
-          last_name: form.last_name.trim(),
-        },
+        profile,
       };
       try {
         await updateUser(editTarget.id, req);

@@ -3,11 +3,14 @@
  *
  * Fetches the flat /folders.json list (via the API_CALL pass-through service)
  * and nests it client-side; renders the "全部凭据" root + a virtual "收藏"
- * node; supports create / rename / move / cascade-aware delete and accepts
- * HTML5-dropped resources from the resource list (moves them via
- * PUT /move/Resource — note the CAPITALIZED /move casing vs lowercase /share).
+ * node; supports create / rename / share / export / move / cascade-aware
+ * delete, and accepts HTML5 drops of BOTH resources (from the resource list)
+ * and folders (from this tree), moving them via PUT /move/{Resource,Folder}
+ * — note the CAPITALIZED /move casing vs lowercase /share.
  *
- * Folders carry no secret material, so this component performs NO crypto.
+ * Folders carry no secret material, so this component performs NO crypto — the
+ * folder ShareDialog below likewise only moves permission rows (SHARE_APPLY's
+ * folder branch skips both simulate and secret re-encryption).
  */
 import {
   useCallback,
@@ -20,10 +23,13 @@ import {
 } from 'react';
 import {
   ChevronRight,
+  Download,
   Folder as FolderIcon,
+  FolderPlus,
   MoreHorizontal,
   Pencil,
   Plus,
+  Share2,
   Star,
   Trash2,
   Users,
@@ -32,6 +38,7 @@ import {
 } from 'lucide-react';
 import { Modal } from '../../components/Modal';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import ShareDialog from '../../components/share/ShareDialog';
 import { useToast } from '../../lib/toast';
 import { tf } from '../../lib/i18n';
 import { describeApiError } from '../../lib/errors';
@@ -60,10 +67,40 @@ export interface FolderTreeProps {
   onToggleFavorites?: (on: boolean) => void;
   /** Called after a drag-dropped resource has been successfully moved. */
   onResourceMoved?: () => void;
+  /**
+   * Called after the folder SET changes here (create / rename / move / delete).
+   * The parent owns a second copy of the folders (folderMembership from
+   * useVaultData); without this it goes stale — a freshly created folder would
+   * be absent from the parent's membership map until an unrelated refetch.
+   */
+  onFoldersChanged?: () => void;
+  /**
+   * Asks the parent to export this folder's subtree. Optional: without it the
+   * "导出" menu entry is not rendered at all (the tree cannot export on its own
+   * — the export scope needs the parent's resolved resource list).
+   */
+  onExportFolder?: (folder: Folder) => void;
 }
 
 /** The drag-and-drop MIME type the resource list sets on a dragged row. */
 export const RESOURCE_DRAG_MIME = 'application/x-jpassbolt-resource-id';
+
+/**
+ * The drag-and-drop MIME type a dragged FOLDER row carries. Deliberately
+ * distinct from RESOURCE_DRAG_MIME and deliberately NOT accompanied by a
+ * text/plain copy: readDroppedResourceId() below accepts any UUID found in
+ * text/plain, and a folder id is a UUID too — a text/plain folder id would be
+ * mistaken for a resource id and moved with PUT /move/Resource/{folderId}.
+ */
+export const FOLDER_DRAG_MIME = 'application/x-jpassbolt-folder-id';
+
+/**
+ * Rough height of the open row menu, used only to decide whether it opens
+ * upwards. The menu is position:absolute inside .folders-scroll (overflow-y:
+ * auto), so a 6-entry menu on a row near the bottom would otherwise be clipped.
+ * Flipping the INLINE offsets keeps this a zero-CSS change.
+ */
+const MENU_EST_HEIGHT = 250;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -72,8 +109,16 @@ export const RESOURCE_DRAG_MIME = 'application/x-jpassbolt-resource-id';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function readDroppedResourceId(e: DragEvent): string | null {
+  // UUID-checked like the text/plain branch below, and like handleRowDrop does
+  // for FOLDER_DRAG_MIME. Drag payloads are NOT same-origin data: the app runs
+  // as an iframe injected into a server page, and in the zero-knowledge model
+  // the server is untrusted — a compromised host page can set our proprietary
+  // MIME to anything and bait a drag. The value is interpolated unencoded into
+  // PUT /move/Resource/{id}.json, and the API_CALL guard only checks the path
+  // starts with '/', so a value like '../../resources/{uuid}' would normalise
+  // into a different endpoint. Anything that is not a bare UUID is dropped.
   const typed = e.dataTransfer.getData(RESOURCE_DRAG_MIME).trim();
-  if (typed) return typed;
+  if (typed) return UUID_RE.test(typed) ? typed : null;
   // text/plain fallback: the resource list sets both types (vault/index.tsx),
   // but arbitrary browser drags (selected text, URLs) also carry text/plain —
   // only accept values that look like a resource UUID.
@@ -109,6 +154,8 @@ export default function FolderTree({
   favoritesOnly = false,
   onToggleFavorites,
   onResourceMoved,
+  onFoldersChanged,
+  onExportFolder,
 }: FolderTreeProps) {
   const toast = useToast();
   const activeId = selectedFolderId;
@@ -119,7 +166,18 @@ export default function FolderTree({
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  /** Whether the open menu drops upwards (row too close to the scroller's end). */
+  const [menuUp, setMenuUp] = useState(false);
   const [dropTargetId, setDropTargetId] = useState<string | null | 'root'>(null);
+  /**
+   * Id of the folder currently being dragged. Required because dragover /
+   * dragenter run in the HTML5 "protected mode": only dataTransfer.types is
+   * readable there, getData() returns "" — so the validity of a hovered target
+   * can only be judged against an id captured at dragstart.
+   */
+  const [draggingFolderId, setDraggingFolderId] = useState<string | null>(null);
+
+  const [shareTarget, setShareTarget] = useState<Folder | null>(null);
 
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState('');
@@ -212,13 +270,14 @@ export default function FolderTree({
         setCreateParent('');
         if (createParent) setExpanded((prev) => new Set(prev).add(createParent));
         await load();
+        onFoldersChanged?.();
       } catch (err) {
         toast.error(describeApiError(err));
       } finally {
         setCreateBusy(false);
       }
     },
-    [createName, createParent, load, toast],
+    [createName, createParent, load, toast, onFoldersChanged],
   );
 
   const handleRename = useCallback(
@@ -236,13 +295,14 @@ export default function FolderTree({
         toast.success(ft('toast.renamed', '文件夹已重命名。'));
         setRenameTarget(null);
         await load();
+        onFoldersChanged?.();
       } catch (err) {
         toast.error(describeApiError(err));
       } finally {
         setRenameBusy(false);
       }
     },
-    [renameTarget, renameName, load, toast],
+    [renameTarget, renameName, load, toast, onFoldersChanged],
   );
 
   const handleMove = useCallback(
@@ -266,13 +326,14 @@ export default function FolderTree({
         setMoveTarget(null);
         if (newParent) setExpanded((prev) => new Set(prev).add(newParent));
         await load();
+        onFoldersChanged?.();
       } catch (err) {
         toast.error(describeApiError(err));
       } finally {
         setMoveBusy(false);
       }
     },
-    [moveTarget, moveParent, folderName, load, toast],
+    [moveTarget, moveParent, folderName, load, toast, onFoldersChanged],
   );
 
   const handleDelete = useCallback(async () => {
@@ -291,12 +352,13 @@ export default function FolderTree({
       setDeleteTarget(null);
       setDeleteCascade(false);
       await load();
+      onFoldersChanged?.();
     } catch (err) {
       toast.error(describeApiError(err));
     } finally {
       setDeleteBusy(false);
     }
-  }, [deleteTarget, deleteCascade, activeId, onSelect, load, toast]);
+  }, [deleteTarget, deleteCascade, activeId, onSelect, load, toast, onFoldersChanged]);
 
   const handleResourceDrop = useCallback(
     async (e: DragEvent, destinationFolderId: string | null) => {
@@ -320,15 +382,106 @@ export default function FolderTree({
     [folderName, load, onResourceMoved, toast],
   );
 
-  const onRowDragOver = useCallback((e: DragEvent) => {
-    // Only accept drags carrying our proprietary resource-id type; arbitrary
-    // browser drags (selected text, links) only expose text/plain and must not
-    // show a drop affordance here.
-    if (e.dataTransfer.types.includes(RESOURCE_DRAG_MIME)) {
+  /**
+   * Whether `folderId` may be re-parented under `destId` (null = root).
+   * Rejects a no-op (already that parent) and any cycle (dropping a folder on
+   * itself or on one of its own descendants). Note isSelfOrDescendant's
+   * argument order: (subtree root = the dragged folder, candidate = the target).
+   */
+  const canMoveFolderTo = useCallback(
+    (folderId: string, destId: string | null): boolean => {
+      const dragged = folders.find((f) => f.id === folderId);
+      if (!dragged) return false;
+      if ((dragged.folder_parent_id ?? null) === destId) return false; // no-op
+      if (destId === null) return true; // the root always accepts
+      return !isSelfOrDescendant(folderId, destId, byParent);
+    },
+    [folders, byParent],
+  );
+
+  /**
+   * Whether a drag hovering `destId` should get a drop affordance. Only our two
+   * proprietary MIME types qualify — arbitrary browser drags (selected text,
+   * links) carry text/plain alone and must not light up a row.
+   */
+  const acceptsDrag = useCallback(
+    (e: DragEvent, destId: string | null): boolean => {
+      const types = e.dataTransfer.types;
+      if (types.includes(RESOURCE_DRAG_MIME)) return true;
+      return (
+        types.includes(FOLDER_DRAG_MIME) &&
+        !!draggingFolderId &&
+        canMoveFolderTo(draggingFolderId, destId)
+      );
+    },
+    [draggingFolderId, canMoveFolderTo],
+  );
+
+  const onRowDragOver = useCallback(
+    (e: DragEvent, destId: string | null) => {
+      // Withholding preventDefault() on an illegal target is what makes the
+      // cursor show "no-drop" and keeps .frow.drop from lighting up.
+      if (acceptsDrag(e, destId)) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+      }
+    },
+    [acceptsDrag],
+  );
+
+  const handleFolderDrop = useCallback(
+    async (folderId: string, destinationFolderId: string | null) => {
+      // Re-validate against the id that actually landed rather than trusting
+      // the draggingFolderId state (dragend/drop ordering is not guaranteed).
+      const dragged = folders.find((f) => f.id === folderId);
+      if (!dragged) return;
+      // Dropped back onto its own parent: a no-op, not an error — say nothing.
+      if ((dragged.folder_parent_id ?? null) === destinationFolderId) return;
+      if (!canMoveFolderTo(folderId, destinationFolderId)) {
+        // Defensive: dragover already withholds the drop for illegal targets,
+        // so this should be unreachable — but never move a folder into a cycle.
+        toast.error(ft('toast.moveInvalid', '不能把文件夹移动到它自己或它的子文件夹中。'));
+        return;
+      }
+      try {
+        await moveFolder(folderId, destinationFolderId);
+        toast.success(
+          ft('toast.moved', '已将「{{name}}」移动到 {{destination}}。', {
+            name: dragged.name,
+            destination: folderName(destinationFolderId),
+          }),
+        );
+        if (destinationFolderId) setExpanded((prev) => new Set(prev).add(destinationFolderId));
+        await load();
+        onFoldersChanged?.();
+      } catch (err) {
+        toast.error(describeApiError(err));
+      }
+    },
+    [canMoveFolderTo, folders, folderName, load, onFoldersChanged, toast],
+  );
+
+  /**
+   * Single drop entry point for every row (folder rows and the 全部凭据 root).
+   * The FOLDER branch MUST come first and return: folder ids are UUIDs too, and
+   * readDroppedResourceId() falls back to any UUID in text/plain — letting a
+   * folder drag reach the resource branch would PUT /move/Resource on it.
+   */
+  const handleRowDrop = useCallback(
+    (e: DragEvent, destinationFolderId: string | null) => {
       e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-    }
-  }, []);
+      setDropTargetId(null);
+      if (e.dataTransfer.types.includes(FOLDER_DRAG_MIME)) {
+        const folderId = e.dataTransfer.getData(FOLDER_DRAG_MIME).trim();
+        setDraggingFolderId(null);
+        if (!UUID_RE.test(folderId)) return;
+        void handleFolderDrop(folderId, destinationFolderId);
+        return;
+      }
+      void handleResourceDrop(e, destinationFolderId);
+    },
+    [handleFolderDrop, handleResourceDrop],
+  );
 
   // Recursive folder row render ------------------------------------------------
   const renderNode = useCallback(
@@ -341,6 +494,19 @@ export default function FolderTree({
 
       return (
         <div key={node.id}>
+          {/* `draggable` belongs on .frow only: the wrapper also contains the
+              child-row <div role="group">, so making IT the drag source would
+              drag the whole subtree. .frow and the group are siblings, hence a
+              child row's drop never bubbles into its parent row either.
+
+              It is turned OFF while this row's ··· menu is open. The menu renders
+              inside .frow, and the drag source is "the first ancestor with
+              draggable=true" — draggable={false} on the menu does NOT halt that
+              walk, so a press-and-twitch on a menu item would otherwise start a
+              real folder drag and silently PUT /move/Folder/{id} while the item
+              itself never fires. It has to be stopped here at the source:
+              dragstart fires ON .frow, so the menu is not in its path and no
+              handler down there can preventDefault it. */}
           <div
             className={`frow${isActive ? ' active' : ''}${hasChildren && isOpen ? ' open' : ''}${
               isDropTarget ? ' drop' : ''
@@ -348,18 +514,34 @@ export default function FolderTree({
             role="treeitem"
             aria-selected={isActive}
             aria-expanded={hasChildren ? isOpen : undefined}
-            style={{ position: 'relative', paddingLeft: 9 + depth * 18 }}
+            title={ft('dragFolderHint', '拖到其他文件夹可移动')}
+            style={{
+              position: 'relative',
+              paddingLeft: 9 + depth * 18,
+              opacity: draggingFolderId === node.id ? 0.45 : 1,
+            }}
             onClick={() => onSelect(node.id)}
-            onDragOver={onRowDragOver}
+            draggable={!menuOpen}
+            onDragStart={(e) => {
+              e.dataTransfer.setData(FOLDER_DRAG_MIME, node.id);
+              // NO text/plain copy — see FOLDER_DRAG_MIME's note.
+              e.dataTransfer.effectAllowed = 'move';
+              setDraggingFolderId(node.id);
+            }}
+            onDragEnd={() => {
+              setDraggingFolderId(null);
+              setDropTargetId(null);
+            }}
+            onDragOver={(e) => onRowDragOver(e, node.id)}
             onDragEnter={(e) => {
-              if (e.dataTransfer.types.includes(RESOURCE_DRAG_MIME)) setDropTargetId(node.id);
+              if (acceptsDrag(e, node.id)) setDropTargetId(node.id);
             }}
             onDragLeave={(e) => {
               if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) {
                 setDropTargetId((cur) => (cur === node.id ? null : cur));
               }
             }}
-            onDrop={(e) => void handleResourceDrop(e, node.id)}
+            onDrop={(e) => handleRowDrop(e, node.id)}
           >
             {hasChildren ? (
               <button
@@ -387,14 +569,42 @@ export default function FolderTree({
               aria-label={ft('folderActions', '文件夹操作')}
               onClick={(e) => {
                 e.stopPropagation();
+                // Flip the menu upwards when the row sits too close to the
+                // bottom of the (overflow-y:auto) scroller to fit it below.
+                const rowBottom = e.currentTarget.getBoundingClientRect().bottom;
+                const box = containerRef.current?.getBoundingClientRect();
+                setMenuUp(!!box && rowBottom + MENU_EST_HEIGHT > box.bottom);
                 setMenuFor((cur) => (cur === node.id ? null : node.id));
               }}
             >
               <MoreHorizontal />
             </button>
 
+            {/* Official order (新建文件夹 / 重命名 / 分享 / 导出 / 删除) kept
+                contiguous and unbroken; "移动…" is this port's own extra and so
+                sits last among the non-destructive entries, right before the
+                separator that isolates the destructive 删除. A press in here
+                cannot start a row drag because .frow drops `draggable` whenever
+                this menu is open — see the note on .frow above. */}
             {menuOpen && (
-              <div className="menu" role="menu" style={{ top: '100%', right: 4 }} onClick={(e) => e.stopPropagation()}>
+              <div
+                className="menu"
+                role="menu"
+                style={menuUp ? { bottom: '100%', right: 4 } : { top: '100%', right: 4 }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <button
+                  onClick={() => {
+                    setMenuFor(null);
+                    setCreateName('');
+                    // node.id, NOT activeId: the ··· button stops propagation,
+                    // so this menu can be opened on an UNSELECTED folder.
+                    setCreateParent(node.id);
+                    setCreateOpen(true);
+                  }}
+                >
+                  <FolderPlus /> {ft('menu.newSubfolder', '在此新建文件夹')}
+                </button>
                 <button
                   onClick={() => {
                     setMenuFor(null);
@@ -404,6 +614,24 @@ export default function FolderTree({
                 >
                   <Pencil /> {ft('menu.rename', '重命名')}
                 </button>
+                <button
+                  onClick={() => {
+                    setMenuFor(null);
+                    setShareTarget(node);
+                  }}
+                >
+                  <Share2 /> {ft('menu.share', '共享')}
+                </button>
+                {onExportFolder && (
+                  <button
+                    onClick={() => {
+                      setMenuFor(null);
+                      onExportFolder(node);
+                    }}
+                  >
+                    <Download /> {ft('menu.export', '导出')}
+                  </button>
+                )}
                 <button
                   onClick={() => {
                     setMenuFor(null);
@@ -439,10 +667,14 @@ export default function FolderTree({
       favoritesOnly,
       expanded,
       dropTargetId,
+      draggingFolderId,
       menuFor,
+      menuUp,
       onSelect,
+      onExportFolder,
       onRowDragOver,
-      handleResourceDrop,
+      acceptsDrag,
+      handleRowDrop,
       toggleExpand,
     ],
   );
@@ -468,7 +700,8 @@ export default function FolderTree({
       <div className="folders-scroll">
         <div className="fsec-label">{ft('quickAccess', '快速访问')}</div>
 
-        {/* 全部凭据 (root) — also a drop target moving resources to root. */}
+        {/* 全部凭据 (root) — also a drop target moving resources OR folders to
+            the root of the current user's tree. */}
         <div
           className={`frow${activeId === null && !favoritesOnly ? ' active' : ''}${
             dropTargetId === 'root' ? ' drop' : ''
@@ -478,12 +711,12 @@ export default function FolderTree({
             onToggleFavorites?.(false);
             onSelect(null);
           }}
-          onDragOver={onRowDragOver}
+          onDragOver={(e) => onRowDragOver(e, null)}
           onDragEnter={(e) => {
-            if (e.dataTransfer.types.includes(RESOURCE_DRAG_MIME)) setDropTargetId('root');
+            if (acceptsDrag(e, null)) setDropTargetId('root');
           }}
           onDragLeave={() => setDropTargetId((cur) => (cur === 'root' ? null : cur))}
-          onDrop={(e) => void handleResourceDrop(e, null)}
+          onDrop={(e) => handleRowDrop(e, null)}
         >
           <span style={{ width: 12, flex: '0 0 12px' }} />
           <VaultIcon />
@@ -554,7 +787,13 @@ export default function FolderTree({
       {/* ---- Create modal ---- */}
       <Modal
         open={createOpen}
-        title={ft('newFolder', '新建文件夹')}
+        title={
+          createParent
+            ? ft('createTitleUnder', '在「{{name}}」中新建文件夹', {
+                name: folderName(createParent),
+              })
+            : ft('newFolder', '新建文件夹')
+        }
         onClose={() => !createBusy && setCreateOpen(false)}
         maxWidth={420}
         footer={
@@ -733,6 +972,27 @@ export default function FolderTree({
           setDeleteCascade(false);
         }}
       />
+
+      {/* ---- Folder share ----
+          Mounted HERE, not in the vault page: this component owns a PRIVATE
+          copy of `folders`, and a share flips `personal` (the Users badge on
+          the row) — only our own load() can refresh that. onFoldersChanged then
+          syncs the parent's second copy (useVaultData). */}
+      {shareTarget && (
+        <ShareDialog
+          open
+          foreignModel="folder"
+          folderId={shareTarget.id}
+          folderName={shareTarget.name}
+          onClose={(didChange) => {
+            setShareTarget(null);
+            if (didChange) {
+              void load();
+              onFoldersChanged?.();
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

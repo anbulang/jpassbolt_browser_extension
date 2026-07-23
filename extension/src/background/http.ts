@@ -118,9 +118,24 @@ export async function apiCallRaw(
 // ---------------------------------------------------------------------------
 // GpgAuth (3-stage) — ported from the SPA's auth.ts, fetch + worker edition
 // ---------------------------------------------------------------------------
+
+/**
+ * The only shape a decrypted stage-1 challenge may have (official
+ * `GpgAuthToken`): `gpgauthv1.3.0|36|{uuid}|gpgauthv1.3.0`. Anything else must
+ * never be echoed back to the server — see the oracle note in `gpgAuth`.
+ */
+const GPGAUTH_NONCE =
+  /^gpgauthv1\.3\.0\|36\|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\|gpgauthv1\.3\.0$/;
+
 export async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: string }> {
   const base = await apiBase();
   const fingerprint = privateKey.getFingerprint();
+
+  // SP-11 note: server-key verification (GpgAuth Stage 0) and the migration pin
+  // are NOT done here. They live in unlockHandler, which owns the full unlock
+  // lifecycle including the cheap storedJwt reuse path that bypasses gpgAuth —
+  // doing Stage 0 only inside gpgAuth would let that shortcut skip it. gpgAuth's
+  // sole caller (unlockHandler) runs Stage 0 before ever reaching here.
 
   // Stage 1: request the encrypted challenge for our keyid.
   const stage1 = await fetch(base + '/auth/login.json', {
@@ -136,6 +151,13 @@ export async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: st
   const armored = decodeURIComponent(encryptedToken.replace(/\+/g, ' '));
   const message = await openpgp.readMessage({ armoredMessage: armored });
   const { data: nonce } = await openpgp.decrypt({ message, decryptionKeys: privateKey });
+
+  // The server only ever gets back a value that LOOKS like a challenge. Without
+  // this check a malicious or compromised server could hand us any ciphertext
+  // encrypted to our key — one of our own stored secrets, say — and stage 2
+  // would dutifully decrypt it and post the plaintext straight back, turning
+  // login into a decryption oracle that defeats the whole zero-knowledge model.
+  if (!GPGAUTH_NONCE.test(String(nonce))) throw new Error(t('bg.badChallengeFormat'));
 
   // Stage 2: return the decrypted nonce.
   const stage2 = await fetch(base + '/auth/login.json', {

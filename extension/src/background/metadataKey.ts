@@ -112,10 +112,12 @@ async function load(): Promise<void> {
   const isCurrent = () => gen === myGen;
   lastError = null;
   try {
-    const keys = await apiCall<MetadataKeyRow[]>(
-      'GET',
-      '/metadata/keys.json?contain[metadata_private_keys]=1',
-    );
+    // The contain NAME carries square brackets, which Tomcat's query parser
+    // rejects unencoded (400 HTML page, before Spring runs) — never hand-build
+    // this query string. URLSearchParams emits %5B/%5D, which the servlet
+    // decodes back to the literal name the @RequestParam binds.
+    const sp = new URLSearchParams({ 'contain[metadata_private_keys]': '1' });
+    const keys = await apiCall<MetadataKeyRow[]>('GET', `/metadata/keys.json?${sp}`);
     if (!isCurrent()) return;
     const active = (keys ?? []).find((k) => k.deleted == null && k.expired == null) ?? null;
 

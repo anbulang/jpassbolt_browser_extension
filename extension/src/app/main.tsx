@@ -14,12 +14,12 @@
  */
 import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { HashRouter, Navigate, Outlet, Route, Routes } from 'react-router-dom';
+import { HashRouter, Navigate, Outlet, Route, Routes, useNavigate } from 'react-router-dom';
 import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import { SESSION_DESYNC_EVENT, rpc } from '../shared/messages';
-import { Flow, Header, useStatus } from '../ui/components';
+import { Flow, useStatus } from '../ui/components';
 import { AppLayout } from './Layout';
 import { ToastProvider } from './lib/toast';
 import { guestRoutes, protectedRoutes } from './routes';
@@ -107,6 +107,7 @@ function mapHostPathname(p: string): string {
 // ---- protected shell --------------------------------------------------------
 function ProtectedShell() {
   const { status, setStatus, refresh } = useStatus();
+  const navigate = useNavigate();
 
   // Fall back to the lock screen when the background locks the session behind
   // our back (idle alarm, 401 dead-session teardown, action in another surface):
@@ -133,16 +134,19 @@ function ProtectedShell() {
   if (status?.phase === 'unlocked') {
     return <AppLayout status={status} onStatus={setStatus} />;
   }
-  // Onboarding / locked: the centered card flow (server → key import → unlock).
+  // Onboarding / locked: surface="page" renders the same centered flow-card
+  // overlay as the guest setup/recovery wizards, mounted bare like they are.
+  // No jpb-shell/Header/jpb-body wrapper: .flow-overlay is fixed+opaque and
+  // would bury the header anyway, leaving dead markup that still takes layout
+  // and stays Tab-focusable off-screen. It also keeps the unlock card out of
+  // .jpb-app .jpb-body (max-width:900px, top-aligned), which is the AppLayout
+  // container and the reason the card used to sit off-center.
+  // Onboarding / "sign in as someone else" both route to the guest
+  // recovery-request flow, a sibling hash route of this shell.
   return (
-    <div className="jpb-shell">
-      <Header account={status?.account ?? null} />
-      <div className="jpb-body">
-        <Flow status={status} onChange={setStatus}>
-          {null}
-        </Flow>
-      </div>
-    </div>
+    <Flow surface="page" status={status} onChange={setStatus} onRecover={() => navigate('/recover')}>
+      {null}
+    </Flow>
   );
 }
 

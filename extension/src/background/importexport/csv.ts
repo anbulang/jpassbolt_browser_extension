@@ -18,6 +18,12 @@ export interface ImportEntry {
   description: string;
   /** otpauth:// URI or raw TOTP seed if the source carried one (best-effort). */
   totp?: string;
+  /**
+   * Folder hierarchy as path SEGMENTS (top → leaf), e.g. ['Bank', 'Cards'].
+   * A segment array (rather than a joined string) sidesteps the ambiguity of a
+   * folder name that itself contains the '/' separator. undefined = vault root.
+   */
+  folderPath?: string[];
 }
 
 /** Case-insensitive column aliases across KeePass / LastPass / Bitwarden /
@@ -29,7 +35,29 @@ const COLS: Record<keyof ImportEntry, string[]> = {
   password: ['password', 'login_password', 'secret', 'pass'],
   description: ['description', 'notes', 'note', 'comments', 'comment', 'extra'],
   totp: ['totp', 'otpauth', 'one-time password', 'otp', 'login_totp', 'otp secret', 'otpauth url'],
+  // Passbolt exports `folder_parent_path` (a leading-slash path); KeePass/KDBX
+  // CSV exports carry `Group` (e.g. 'Database/Bank'); LastPass uses `grouping`
+  // (backslash-separated). NOT `category`: many exporters (1Password, generic)
+  // use it for item TYPE ('Login', 'Secure Note'), which would build bogus
+  // type-named folders — a folder column must be an explicit folder column.
+  folderPath: ['group', 'grouping', 'folder', 'folder_parent_path'],
 };
+
+/**
+ * Split a raw folder-path cell ('/Bank/Cards', 'Database/Bank', 'Work\\Servers',
+ * …) into trimmed, non-empty segments. Both '/' (Passbolt/KeePass) and '\\'
+ * (LastPass `grouping`, Windows paths) are accepted as separators; leading
+ * separators and blank segments (double separators) are dropped; an empty cell
+ * yields undefined.
+ */
+function splitFolderPath(raw: string): string[] | undefined {
+  const segments = raw
+    .replace(/^[\\/]+/, '')
+    .split(/[\\/]/)
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  return segments.length ? segments : undefined;
+}
 
 function pick(row: Record<string, string>, aliases: string[]): string {
   // Iterate ALIASES in preference order (not the CSV's column order): a file with
@@ -65,6 +93,7 @@ export function parseCsv(text: string): ImportEntry[] {
       password: pick(row, COLS.password),
       description: pick(row, COLS.description),
       totp: pick(row, COLS.totp) || undefined,
+      folderPath: splitFolderPath(pick(row, COLS.folderPath)),
     };
     // Keep a row only if it has SOMETHING worth importing (a password or a name).
     if (entry.password || entry.name || entry.username) {
@@ -78,17 +107,7 @@ export function parseCsv(text: string): ImportEntry[] {
   return entries;
 }
 
-/** Build a plaintext CSV (Passbolt-compatible columns). Caller must warn the user. */
-export function buildCsv(entries: ImportEntry[]): string {
-  return Papa.unparse(
-    entries.map((e) => ({
-      name: e.name,
-      username: e.username,
-      uri: e.uri,
-      password: e.password,
-      description: e.description,
-      totp: e.totp ?? '',
-    })),
-    { columns: ['name', 'username', 'uri', 'password', 'description', 'totp'] },
-  );
-}
+// NOTE: there is deliberately no buildCsv counterpart — plaintext CSV export was
+// removed so a decrypted vault can never be written to disk unencrypted. Export
+// is KDBX-only (see handlers/importexport.ts EXPORT_BUILD), which encrypts the
+// whole archive with a user-chosen passphrase and keeps export zero-knowledge-safe.

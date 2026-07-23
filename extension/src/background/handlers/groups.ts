@@ -21,6 +21,7 @@
  * cache could serve a stale key across a key rotation.
  */
 import { t } from '../../shared/i18n';
+import { joinName } from '../../shared/names';
 import type { Req } from '../../shared/messages';
 import type { GroupsRespMap } from '../../shared/rpc/groups';
 import type { Group, GroupDryRunResult, SecretWrite, User } from '../../shared/types';
@@ -34,8 +35,7 @@ type GroupSaveReq = Extract<Req, { type: 'GROUP_SAVE_REENCRYPT' }>;
 /** Best-effort display name for error messages (falls back to the user id). */
 function displayName(user: User | null | undefined, fallback: string): string {
   if (!user) return fallback;
-  const full = [user.profile?.first_name, user.profile?.last_name].filter(Boolean).join(' ');
-  return full || user.username || fallback;
+  return joinName(user.profile?.first_name, user.profile?.last_name) || user.username || fallback;
 }
 
 /**

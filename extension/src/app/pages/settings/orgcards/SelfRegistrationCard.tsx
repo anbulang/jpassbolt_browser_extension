@@ -15,7 +15,7 @@ import {
 import { describeApiError } from '../../../lib/errors';
 import { useToast } from '../../../lib/toast';
 import { tf } from '../../../lib/i18n';
-import { CardSpinner, ErrorBanner } from '../OrgPoliciesSection';
+import { CardSpinner, CardErrorBanner as ErrorBanner } from '../cardKit';
 
 /**
  * Parse a free-text domain list (newline / comma / space separated) into a

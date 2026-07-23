@@ -7,25 +7,34 @@ export interface ImportEntryMeta {
   name: string;
   username?: string;
   uri?: string;
-  folderPath?: string;
+  /** Folder hierarchy (top → leaf) the row will be imported into; UI preview. */
+  folderPath?: string[];
 }
 
 export type ImportExportReq =
+  // Import still accepts both formats — only EXPORT is KDBX-only.
   | { type: 'IMPORT_STAGE'; format: 'csv' | 'kdbx'; dataB64: string; kdbxPassword?: string }
   // indices lets the UI commit in batches (MV3 service-worker liveness); omitted
   // means "commit everything still staged".
   | { type: 'IMPORT_COMMIT'; importId: string; indices?: number[] }
   | { type: 'IMPORT_DISCARD'; importId: string }
   | {
+      // KDBX-only: plaintext CSV export was removed (a decrypted vault must never
+      // be written to disk unencrypted). The background rejects any other format.
       type: 'EXPORT_BUILD';
-      format: 'csv' | 'kdbx';
+      format: 'kdbx';
       resourceIds?: string[];
+      /** Restrict the export to these folders and their whole subtree (closure). */
+      folderIds?: string[];
       kdbxPassword?: string;
       dbName?: string;
     };
 
 export interface ImportExportRespMap {
-  IMPORT_STAGE: { importId: string; entries: ImportEntryMeta[] };
+  // rootFolderName is the `import-yyyymmdd-HHmmss` reference-root name the
+  // background latches at stage time (local time, so the same file imported
+  // twice in one day never collides). The UI shows it in the hierarchy note.
+  IMPORT_STAGE: { importId: string; entries: ImportEntryMeta[]; rootFolderName?: string };
   IMPORT_COMMIT: { created: number; failed: { index: number; error: string }[] };
   IMPORT_DISCARD: { ok: true };
   // exported/failed mirror the SPA's ExportResult so the UI can surface rows

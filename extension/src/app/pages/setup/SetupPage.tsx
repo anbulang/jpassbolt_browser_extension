@@ -24,14 +24,12 @@
  * `activated` flag keeps the consumed setup token from being re-submitted so
  * the user can simply retry unlocking (or go back and re-enter).
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   AlertTriangle,
   Check,
   Download,
-  Eye,
-  EyeOff,
   Fingerprint,
   Globe,
   KeyRound,
@@ -48,15 +46,25 @@ import { t } from '../../../shared/i18n';
 import type { User } from '../../../shared/types';
 import { startSetup, completeSetup } from '../../services/setup';
 import { describeApiError } from '../../lib/errors';
+import PassphraseInput from '../../components/PassphraseInput';
+import SecurityTokenPicker from '../../components/SecurityTokenPicker';
 import {
+  DEFAULT_SECURITY_TOKEN,
+  getSecurityToken,
+  isValidTokenCode,
+} from '../../../shared/securityToken';
+import {
+  ExistingAccountGate,
   KeyFileButton,
   KeyGen,
   PP_LABEL,
   Stepper,
   accountIdentity,
   downloadRecoveryKit,
+  enterVaultHref,
   formatFingerprint,
   fullName,
+  persistSecurityToken,
   ppScore,
 } from './flowHelpers';
 
@@ -116,10 +124,48 @@ export default function SetupPage() {
   const [importArmored, setImportArmored] = useState('');
   const [generating, setGenerating] = useState(false);
 
+  // Step 2 — security token (anti-phishing mark, chosen alongside the passphrase).
+  // SEEDED from storage rather than hard-started at DEFAULT on purpose: on a
+  // device that already holds an account this returns the user's REAL mark, so
+  // the picker agrees with the badge rendered inside the passphrase fields
+  // below. Starting at DEFAULT would show 'JPB' to a user whose mark is
+  // something else — a self-inflicted phishing false alarm. A fresh device
+  // simply gets DEFAULT, and leaving it untouched is a valid choice (it is then
+  // written explicitly at commit, which is what stops the next account on this
+  // device from inheriting the previous user's mark).
+  const [tokenCode, setTokenCode] = useState(DEFAULT_SECURITY_TOKEN.code);
+  const [tokenColor, setTokenColor] = useState(DEFAULT_SECURITY_TOKEN.color);
+  // The account IS set up but the mark could not be stored — non-blocking hint.
+  const [tokenSaveFailed, setTokenSaveFailed] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    void getSecurityToken().then((tk) => {
+      if (cancelled) return;
+      setTokenCode(tk.code);
+      setTokenColor(tk.color);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Step 2 — passphrase
   const [pf, setPf] = useState('');
   const [pf2, setPf2] = useState('');
-  const [show, setShow] = useState(false);
+  // Non-blocking HIBP breach warning for the chosen master passphrase (white-paper
+  // SP-09). null = not checked / clean / service unreachable; >0 = breach count.
+  const [pfPwned, setPfPwned] = useState<number | null>(null);
+  // k-anonymity check (only the SHA-1 prefix leaves the device, in the worker).
+  // Purely informational — it never gates the flow; a failed lookup stays silent.
+  const checkPassphrasePwned = async () => {
+    if (!pf) return;
+    try {
+      const { count } = await rpc({ type: 'PWNED', password: pf });
+      setPfPwned(count > 0 ? count : null);
+    } catch {
+      setPfPwned(null);
+    }
+  };
 
   // Derived key material. The armored private key is held ONLY when the
   // background returned it (generate mode) or the user pasted it (import mode),
@@ -133,10 +179,26 @@ export default function SetupPage() {
   // staged-key promotion (SETUP_COMMIT clears the staged slots) runs once.
   const [activated, setActivated] = useState(false);
   const [committed, setCommitted] = useState(false);
+  // Set by ExistingAccountGate when this browser already holds an account key and
+  // the user explicitly accepted replacing it. Forwarded to SETUP_COMMIT as
+  // `allowReplace`, which the background REQUIRES before overwriting a key.
+  const [replaceConfirmed, setReplaceConfirmed] = useState(false);
+  // Activation finished: show the top-target "enter vault" link (see enterVaultHref).
+  const [entered, setEntered] = useState(false);
 
   const score = ppScore(pf);
   const match = pf.length > 0 && pf === pf2;
-  const ppOk = score >= 3 && match;
+  const tokenOk = isValidTokenCode(tokenCode);
+  // Feed the picker's live value to the badges below. The chosen mark is only
+  // written to storage after SETUP_COMMIT, so an uncontrolled badge would show
+  // the stale/default mark while the picker right beside it shows the new one.
+  const pickedToken = useMemo(
+    () => ({ code: tokenCode, color: tokenColor }),
+    [tokenCode, tokenColor],
+  );
+  // Step 2 is complete only when BOTH the passphrase and the mark are valid:
+  // the token is picked on this step, so a half-typed code must not advance.
+  const ppOk = score >= 3 && match && tokenOk;
 
   // ---- Step 0: validate the invite link ----
   const acceptInvite = async () => {
@@ -231,16 +293,39 @@ export default function SetupPage() {
         // dropping its session). Before this point the flow is abandonable
         // without side effects on an existing account. The invite-validated
         // identity rides along so the unlock screen can greet this user even
-        // before the UNLOCK below succeeds.
-        await rpc({ type: 'SETUP_COMMIT', account: accountIdentity(user) });
+        // before the UNLOCK below succeeds. `allowReplace` carries the gate's
+        // explicit consent; without it the background refuses to overwrite a key.
+        await rpc({ type: 'SETUP_COMMIT', account: accountIdentity(user), allowReplace: replaceConfirmed });
         setCommitted(true);
+        // The account is ours from this line on, so NOW the chosen mark may be
+        // written — and it is written before the UNLOCK below, which is allowed
+        // to fail and repaint a passphrase prompt: that prompt must already
+        // show the user's own mark. Never throws (see persistSecurityToken for
+        // the storage-ordering proof and the swallow rationale).
+        setTokenSaveFailed(!(await persistSecurityToken({ code: tokenCode, color: tokenColor })));
       }
       // setup/complete activates the account but issues NO JWT (PHP parity):
       // UNLOCK runs the real GpgAuth with the just-persisted key and enters the
       // vault unlocked. A brand-new account has no MFA provider yet, but if the
       // server ever gates it the protected shell's Flow shows the challenge.
-      await rpc({ type: 'UNLOCK', passphrase: pf });
-      navigate('/');
+      const st = await rpc({ type: 'UNLOCK', passphrase: pf });
+      if (st.mfa?.required) {
+        // The challenge lives in the protected shell — stay inside the iframe.
+        navigate('/');
+        return;
+      }
+      // Signed in. Do NOT navigate in-iframe: the HOST tab is still sitting on
+      // the one-time /setup/... link, so a refresh would replay this flow. Reveal
+      // the target="_top" vault link instead — the user's click navigates the
+      // whole tab to /app, where appBootstrap re-mounts the vault (see
+      // enterVaultHref). Only when the server URL is unknown do we fall back to
+      // an in-iframe navigate.
+      const href = enterVaultHref(status?.serverUrl);
+      if (!href) {
+        navigate('/');
+        return;
+      }
+      setEntered(true);
     } catch (err: unknown) {
       // completeSetup throws ApiError (enveloped → describeApiError); UNLOCK
       // throws a plain Error whose message the background already localized.
@@ -257,6 +342,10 @@ export default function SetupPage() {
   };
 
   return (
+    // A setup link always ends in SETUP_COMMIT, which would overwrite any account
+    // key already on this browser — so the gate blocks (and demands an explicit,
+    // backup-aware confirmation) before the wizard is even mounted.
+    <ExistingAccountGate confirmed={replaceConfirmed} onConfirm={() => setReplaceConfirmed(true)}>
     <div className="flow-overlay">
       <div className="flow-card">
         <div className="flow-top">
@@ -393,10 +482,10 @@ export default function SetupPage() {
                     </span>
                   </div>
                   <textarea
-                    // jpb-masked (-webkit-text-security: disc) hides the pasted
-                    // armored private key like a password field — same shoulder-
-                    // surfing defence KeyImportForm uses (commit dd4a481).
-                    className="flow-textarea jpb-masked"
+                    // Shown in plain text (aligned with official Passbolt): the
+                    // armored backup is itself passphrase-encrypted, and plain text
+                    // lets the user eyeball the BEGIN/END blocks when pasting.
+                    className="flow-textarea"
                     placeholder={t('app.auth.setup.key.keyPlaceholder')}
                     value={importArmored}
                     onChange={(e) => setImportArmored(e.target.value)}
@@ -404,6 +493,9 @@ export default function SetupPage() {
                     spellCheck={false}
                     style={{ marginTop: 4 }}
                   />
+                  <div className="jpb-muted" style={{ fontSize: 11.5, marginTop: 6 }}>
+                    {t('app.auth.plaintextBackupNote')}
+                  </div>
                 </>
               )}
 
@@ -443,19 +535,22 @@ export default function SetupPage() {
                       <div className="pf-label">
                         <KeyRound size={15} /> {t('app.auth.setup.passphrase.label')}
                       </div>
-                      <div className="pf-input">
-                        <Lock size={17} />
-                        <input
-                          type={show ? 'text' : 'password'}
-                          autoFocus
-                          value={pf}
-                          placeholder={t('app.auth.setup.passphrase.placeholder')}
-                          onChange={(e) => setPf(e.target.value)}
-                        />
-                        <button type="button" className="pf-eye" onClick={() => setShow((s) => !s)}>
-                          {show ? <EyeOff size={17} /> : <Eye size={17} />}
-                        </button>
-                      </div>
+                      {/* Anti-phishing token (white-paper SP-27): the badge inside
+                          the field + the tinted focus ring show the picker's LIVE
+                          value (token={pickedToken}), not storage — the mark is not
+                          persisted until the account is committed. The onBlur keeps
+                          the non-blocking HIBP breach check. */}
+                      <PassphraseInput
+                        value={pf}
+                        onChange={(v) => {
+                          setPf(v);
+                          setPfPwned(null);
+                        }}
+                        token={pickedToken}
+                        autoFocus
+                        autoComplete="new-password"
+                        onBlur={() => void checkPassphrasePwned()}
+                      />
                       {pf && (
                         <>
                           <div className={'pp-meter s' + score} style={{ marginTop: 10 }}>
@@ -477,6 +572,19 @@ export default function SetupPage() {
                               {PP_LABEL(score)}
                             </span>
                           </div>
+                          {/* Non-blocking breach warning (SP-09): informs but never
+                              stops the user from continuing, matching official. */}
+                          {pfPwned != null && (
+                            <div
+                              className="pf-err"
+                              style={{ color: 'var(--amber-text)', marginTop: 8 }}
+                            >
+                              <AlertTriangle size={13} />{' '}
+                              {t('app.auth.setup.passphrase.pwnedWarning', {
+                                count: pfPwned.toLocaleString(),
+                              })}
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
@@ -484,15 +592,14 @@ export default function SetupPage() {
                       <div className="pf-label">
                         <Check size={15} /> {t('app.auth.setup.passphrase.confirmLabel')}
                       </div>
-                      <div className={'pf-input' + (pf2 && !match ? ' err' : '')}>
-                        <Lock size={17} />
-                        <input
-                          type={show ? 'text' : 'password'}
-                          value={pf2}
-                          placeholder={t('app.auth.setup.passphrase.placeholder')}
-                          onChange={(e) => setPf2(e.target.value)}
-                        />
-                      </div>
+                      <PassphraseInput
+                        value={pf2}
+                        onChange={setPf2}
+                        token={pickedToken}
+                        err={Boolean(pf2) && !match}
+                        showToggle={false}
+                        autoComplete="new-password"
+                      />
                       {pf2 && !match && (
                         <div className="pf-err">
                           <AlertTriangle size={13} /> {t('app.auth.setup.passphrase.mismatch')}
@@ -526,6 +633,24 @@ export default function SetupPage() {
                   <div className="warn-soft">
                     <AlertTriangle /> {t('app.auth.setup.passphrase.warning')}
                   </div>
+
+                  {/* Anti-phishing mark (white-paper SP-27), chosen here and
+                      stored only once the account is really ours (see
+                      enterVault). It is merged into the passphrase step rather
+                      than made a 5th step: the flow's step indices are
+                      hardcoded (step === 0..3), so inserting one would mean
+                      renumbering every branch and jump in this file for two
+                      controls that do not fill a screen. */}
+                  <SecurityTokenPicker
+                    code={tokenCode}
+                    color={tokenColor}
+                    invalid={!tokenOk}
+                    disabled={loading}
+                    onChange={(tk) => {
+                      setTokenCode(tk.code);
+                      setTokenColor(tk.color);
+                    }}
+                  />
 
                   <div className="flow-foot">
                     <button className="btn" onClick={() => setStep(1)}>
@@ -573,6 +698,15 @@ export default function SetupPage() {
                 <div className="dfp-v">{formatFingerprint(fingerprint)}</div>
               </div>
 
+              {/* The mark could not be stored. Deliberately NOT the error
+                  warnbox: the account is fully set up, only a display-only
+                  preference is missing, and it can be set later. */}
+              {tokenSaveFailed && (
+                <div className="warn-soft">
+                  <AlertTriangle /> {t('app.auth.securityToken.saveFailed')}
+                </div>
+              )}
+
               <div className="kit-row">
                 <span className="kr-ico">
                   <Download />
@@ -594,29 +728,46 @@ export default function SetupPage() {
                 </button>
               </div>
 
-              <button
-                className="btn primary"
-                style={{ width: '100%', height: 44, fontSize: 14 }}
-                onClick={() => void enterVault()}
-                disabled={loading}
-              >
-                {loading ? (
-                  <>
-                    <span className="spin-ring" /> {t('app.auth.setup.done.activating')}
-                  </>
-                ) : (
-                  <>
-                    <Unlock size={16} /> {t('app.auth.setup.done.enterVault')}
-                  </>
-                )}
-              </button>
+              {entered ? (
+                // target="_top" leaves the extension iframe and points the HOST
+                // tab at the server's /app URL, replacing the spent /setup token
+                // in the address bar. The click is the user activation that makes
+                // top-level navigation from a cross-origin frame legal.
+                <a
+                  className="btn primary"
+                  style={{ width: '100%', height: 44, fontSize: 14, textDecoration: 'none' }}
+                  href={enterVaultHref(status?.serverUrl)}
+                  target="_top"
+                >
+                  <Unlock size={16} /> {t('app.auth.setup.done.enterVault')}
+                </a>
+              ) : (
+                <button
+                  className="btn primary"
+                  style={{ width: '100%', height: 44, fontSize: 14 }}
+                  onClick={() => void enterVault()}
+                  disabled={loading}
+                >
+                  {loading ? (
+                    <>
+                      <span className="spin-ring" /> {t('app.auth.setup.done.activating')}
+                    </>
+                  ) : (
+                    <>
+                      <Unlock size={16} /> {t('app.auth.setup.done.enterVault')}
+                    </>
+                  )}
+                </button>
+              )}
               <div className="flow-note">
-                <ShieldCheck /> {t('app.auth.setup.done.note')}
+                <ShieldCheck />{' '}
+                {entered ? t('app.auth.setup.done.activated') : t('app.auth.setup.done.note')}
               </div>
             </>
           )}
         </div>
       </div>
     </div>
+    </ExistingAccountGate>
   );
 }

@@ -24,7 +24,13 @@ export const protectedRoutes: AppRoute[] = [
   { path: '/', Component: VaultPage },
   { path: '/users', Component: UsersPage },
   { path: '/groups', Component: GroupsPage },
-  // ?tab=profile|security|account is read by the settings page itself.
+  // The My Profile workspace. ?section=<id> is read by the page itself; the
+  // legacy ?tab=profile|security|account values still resolve there too.
+  { path: '/profile', Component: SettingsPage },
+  // Kept as a live ALIAS rather than a redirect: main.tsx's mapHostPathname maps
+  // a host deep link '/app/settings' onto this hash route, and the rail linked
+  // here for the whole life of the extension. Rendering the same page keeps both
+  // working without a second navigation.
   { path: '/settings', Component: SettingsPage },
   { path: '/settings/encrypted-metadata', Component: MetadataPage },
 ];

@@ -4,3 +4,7 @@ dist/
 .DS_Store
 # read-only reference clone (own .git, ~GB) — never commit
 /passbolt_browser_extension_ref/
+# extension E2E artifacts (screenshots / results / chrome profiles)
+extension/e2e/artifacts/
+extension/e2e/profile-*/
+extension/*.tsbuildinfo

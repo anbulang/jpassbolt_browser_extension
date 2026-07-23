@@ -27,10 +27,15 @@ const APP_PATH = /^\/(app(\/.*)?)?$/;
  * `/setup/x` with NO token — which let ANY website with such a path trigger the
  * cross-origin server adoption below (drive-by trusted-server hijack). The token
  * pair is the trust anchor, so it MUST actually be present before we act.
+ *
+ * The action segment is OPTIONAL only to keep the bare `/setup/{uuid}/{uuid}`
+ * shape of already-sent JPassbolt invitation emails working (new mail uses the
+ * official `/setup/start/` form). That relaxation is safe precisely because the
+ * two-UUID token pair — not the segment name — is the trust anchor.
  */
 const UUID = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}';
 const GUEST_PATH = new RegExp(
-  `^/setup/(?:recover/start|recover|start|install)/${UUID}/${UUID}/?$`,
+  `^/setup/(?:(?:recover/start|recover|start|install)/)?${UUID}/${UUID}/?$`,
 );
 
 /**
@@ -53,8 +58,27 @@ let mounted = false;
 export async function maybeBootstrapApp(): Promise<void> {
   if (mounted || window.top !== window) return;
 
+  // The MV3 service worker is evicted when idle. The content script's FIRST
+  // GET_STATUS can therefore hit a cold / half-woken worker and reject
+  // ("Receiving end does not exist" / empty response). Because this function
+  // only runs on inject and on the SESSION_CHANGED broadcast, a SINGLE silent
+  // failure used to leave the page stuck on the skeleton's "loading workspace"
+  // forever, with nothing in the console. Retry the wake a few times (a worker
+  // cold start is ~sub-second) before giving up, and never fail silently.
   let status;
-  try { status = await rpc({ type: 'GET_STATUS' }); } catch { return; }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      status = await rpc({ type: 'GET_STATUS' });
+      break;
+    } catch (e) {
+      if (attempt === 4) {
+        console.error('[jpb] bootstrap GET_STATUS failed after retries', e);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+    }
+  }
+  if (!status) return;
 
   // Guest flows (setup / recover) PROVISION a new device: there is normally no
   // server configured yet (phase 'no_server'), or one pointing at a different
@@ -78,7 +102,12 @@ export async function maybeBootstrapApp(): Promise<void> {
       // hijack. Refuse to take over cross-origin then — a real server move is
       // handled by the deliberate ServerForm consent step, not a page visit.
       if (status.phase === 'locked' || status.phase === 'unlocked') return;
-      try { await rpc({ type: 'SET_SERVER', serverUrl: location.origin }); } catch { return; }
+      try {
+        await rpc({ type: 'SET_SERVER', serverUrl: location.origin });
+      } catch (e) {
+        console.error('[jpb] bootstrap SET_SERVER failed', e);
+        return;
+      }
     }
     mount();
     return;
@@ -108,9 +137,14 @@ function mount(): void {
     chrome.runtime.getURL('app.html') +
     `?pathname=${encodeURIComponent(location.pathname)}`;
   iframe.setAttribute('title', 'JPassbolt');
+  // Placeholder background shown for the split second before the app paints. Match
+  // the viewer's colour scheme so a light-theme user does not get a dark→light
+  // flash (and vice-versa) — the aegis app bg is near-#0f1115 dark / near-#f7f8fa
+  // light.
+  const dark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? true;
   iframe.setAttribute(
     'style',
-    'position:fixed;inset:0;width:100vw;height:100vh;border:0;margin:0;padding:0;z-index:2147483647;background:#0f1115;',
+    `position:fixed;inset:0;width:100vw;height:100vh;border:0;margin:0;padding:0;z-index:2147483647;background:${dark ? '#0f1115' : '#f7f8fa'};`,
   );
 
   // Hide the skeleton instead of removing it: if anything ever unmounts the

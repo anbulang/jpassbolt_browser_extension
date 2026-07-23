@@ -6,17 +6,15 @@
  *   - SPA locales/<lng>/settings.json orgPolicies.* -> app.administration.orgPolicies.*
  *     (agreed split: WP-SETTINGS-CORE owns the rest of the settings ns; the
  *     OrgPolicies strings live under the administration prefix instead).
+ *     The section shell's own title/subtitle are gone: each card is now a
+ *     standalone section of the settings page and supplies its own heading.
  *   - orgPolicies.password.bool.* replaces the SPA's cross-ns settings
  *     `metadata.bool.*` lookup so this domain stays self-contained.
  */
 import type { Dict } from '../types';
 
 export const en: Dict = {
-  // --- Organization policies section shell + email notifications + password policy ---
-  'app.administration.orgPolicies.title': 'Organization policies (admin)',
-  'app.administration.orgPolicies.subtitle':
-    'Organization-wide email notification and password generation policies. Visible to administrators only.',
-
+  // --- Email notifications + password policy (each is its own settings section) ---
   'app.administration.orgPolicies.emails.title': 'Email notifications',
   'app.administration.orgPolicies.emails.subtitle':
     'Control which transactional emails the server sends and how much content they include. Changes are saved instantly.',
@@ -137,10 +135,7 @@ export const en: Dict = {
 };
 
 export const zh: Dict = {
-  // --- 组织策略区块 + 邮件通知 + 密码策略 ---
-  'app.administration.orgPolicies.title': '组织策略（管理员）',
-  'app.administration.orgPolicies.subtitle': '面向全组织的邮件通知与密码生成策略。这些设置仅管理员可见。',
-
+  // --- 邮件通知 + 密码策略（各自成为一个设置分节） ---
   'app.administration.orgPolicies.emails.title': '邮件通知',
   'app.administration.orgPolicies.emails.subtitle':
     '控制服务器发送哪些事务性邮件，以及邮件中显示多少内容。更改将即时保存。',

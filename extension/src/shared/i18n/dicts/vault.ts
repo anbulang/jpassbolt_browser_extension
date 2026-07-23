@@ -5,10 +5,24 @@
  * were flattened to plain interpolation ({{var}}); the delete confirmation is
  * split into messageBefore/messageAfter so the page can bold the name itself.
  * FolderTree strings live under app.components.folderTree.* in appcommon.ts.
+ * EXCEPTION: the folder "···" menu additions (share / export / new-subfolder)
+ * and the folder drag-and-drop strings are appended HERE under the same
+ * app.components.folderTree.* prefix. The dictionaries are merged flat in
+ * i18n/index.ts (vault spreads AFTER appcommon), so the prefix keeps working
+ * unchanged; the split is one of file ownership, not of namespace.
  */
 import type { Dict } from '../types';
 
 export const en: Dict = {
+  // ---- FolderTree "···" menu + folder drag-and-drop (see the note above) ----
+  'app.components.folderTree.menu.newSubfolder': 'New folder here',
+  'app.components.folderTree.menu.share': 'Share',
+  'app.components.folderTree.menu.export': 'Export',
+  'app.components.folderTree.createTitleUnder': 'New folder in "{{name}}"',
+  'app.components.folderTree.dragFolderHint': 'Drag onto another folder to move',
+  'app.components.folderTree.toast.moveInvalid':
+    'A folder cannot be moved into itself or into one of its own subfolders.',
+
   'app.vault.search.placeholder': 'Search credentials, username, URL…',
   'app.vault.search.clear': 'Clear',
   'app.vault.scope.searchResults': 'Search results',
@@ -126,6 +140,14 @@ export const en: Dict = {
 };
 
 export const zh: Dict = {
+  // ---- FolderTree "···" menu + folder drag-and-drop (see the note above) ----
+  'app.components.folderTree.menu.newSubfolder': '在此新建文件夹',
+  'app.components.folderTree.menu.share': '共享',
+  'app.components.folderTree.menu.export': '导出',
+  'app.components.folderTree.createTitleUnder': '在「{{name}}」中新建文件夹',
+  'app.components.folderTree.dragFolderHint': '拖到其他文件夹可移动',
+  'app.components.folderTree.toast.moveInvalid': '不能把文件夹移动到它自己或它的子文件夹中。',
+
   'app.vault.search.placeholder': '搜索凭据、用户名、网址…',
   'app.vault.search.clear': '清除',
   'app.vault.scope.searchResults': '搜索结果',

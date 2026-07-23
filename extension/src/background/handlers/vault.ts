@@ -175,9 +175,13 @@ async function listUserIdsWithAccess(resourceId: string): Promise<Set<string>> {
     if (p.aro === 'User') {
       userIds.add(p.aro_foreign_key);
     } else if (p.aro === 'Group') {
+      // Bracketed contain name: must be percent-encoded or Tomcat's query
+      // parser 400s the request before Spring sees it (URLSearchParams emits
+      // %5B/%5D; the servlet decodes them back to the bound @RequestParam name).
+      const sp = new URLSearchParams({ 'contain[groups_users]': '1' });
       const group = await apiCall<{ groups_users?: Array<{ user_id?: string }> }>(
         'GET',
-        `/groups/${p.aro_foreign_key}.json?contain[groups_users]=1`,
+        `/groups/${p.aro_foreign_key}.json?${sp}`,
       );
       for (const gu of group?.groups_users ?? []) {
         if (gu.user_id) userIds.add(gu.user_id);

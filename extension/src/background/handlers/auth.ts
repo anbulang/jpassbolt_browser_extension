@@ -27,9 +27,11 @@
  */
 import * as openpgp from 'openpgp';
 import { t } from '../../shared/i18n';
+import { joinName } from '../../shared/names';
 import type { AccountInfo, Req, StatusResult } from '../../shared/messages';
 import { apiBase, gpgAuth } from '../http';
 import { generateKeyPair, normalizeFingerprint } from '../crypto';
+import { getPinnedServerKey, pinServerKey, serverVerifyStage0 } from '../serverKey';
 import {
   K,
   get,
@@ -52,6 +54,7 @@ type SetupImportKeyReq = Extract<Req, { type: 'SETUP_IMPORT_KEY' }>;
 type SetupCommitReq = Extract<Req, { type: 'SETUP_COMMIT' }>;
 type MfaVerifyReq = Extract<Req, { type: 'MFA_VERIFY' }>;
 type UnlockReq = Extract<Req, { type: 'UNLOCK' }>;
+type ChangePassphraseReq = Extract<Req, { type: 'CHANGE_PASSPHRASE' }>;
 
 interface RawUser {
   id: string;
@@ -175,8 +178,7 @@ async function probeMe(jwt: string): Promise<ProbeResult> {
 // session finalization (shared by the no-MFA unlock path and MFA_VERIFY)
 // ---------------------------------------------------------------------------
 function buildAccount(serverUrl: string, user: RawUser, fingerprint: string): AccountInfo {
-  const p = user.profile;
-  const fullName = p ? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() : user.username;
+  const fullName = joinName(user.profile?.first_name, user.profile?.last_name) || user.username;
   return {
     serverUrl,
     username: user.username,
@@ -260,6 +262,30 @@ async function unlockHandler(req: UnlockReq): Promise<StatusResult> {
     unlocked = await openpgp.decryptKey({ privateKey: key, passphrase: req.passphrase });
   } catch {
     throw new Error(t('bg.incorrectPassphrase'));
+  }
+
+  // SP-11 server verify — must run on EVERY unlock, and BEFORE the cheap
+  // storedJwt reuse path below. If it lived only inside gpgAuth() a MITM could
+  // keep /users/me.json answering '200' so the reuse shortcut always wins and
+  // gpgAuth (hence Stage 0) never runs — silently bypassing the pin for every
+  // returning user. Anchoring it here makes "prove the server holds the pinned
+  // key" a per-unlock invariant regardless of which login path is taken.
+  const svBase = await apiBase();
+  const pinned = await getPinnedServerKey(serverUrl);
+  if (pinned) {
+    // Throws ServerKeyMismatchError on a changed/unverifiable server key; it
+    // propagates out of UNLOCK and the UI warns — never a silent fall-through.
+    await serverVerifyStage0(svBase, pinned, unlocked.getFingerprint());
+  } else {
+    // Migration TOFU: an account set up before SP-11 has no pin. Establish it
+    // now (trust-on-first-use of the currently-configured server) so every LATER
+    // unlock is Stage-0 enforced. Best-effort — a fetch failure must not block an
+    // otherwise-valid unlock; the next unlock retries.
+    try {
+      await pinServerKey(svBase, serverUrl);
+    } catch (e) {
+      console.warn('[jpb] deferred server-key pin failed', e);
+    }
   }
 
   // 1) Try the stored JWT (cheap re-unlock path).
@@ -420,8 +446,17 @@ async function setupCommitHandler(req: SetupCommitReq): Promise<StatusResult> {
   const stagedPrivate = await get<string>(K.stagedPrivateKey);
   const stagedPublic = await get<string>(K.stagedPublicKey);
   if (!stagedPrivate || !stagedPublic) throw new Error(t('bg.noPrivateKeyImported'));
+  // Server-side defence-in-depth behind the page's replace-confirmation gate: an
+  // existing account key must NEVER be silently overwritten. Only proceed when
+  // there is no key yet, or the caller explicitly opted into replacing it.
+  const prevPrivate = await get<string>(K.privateKey);
+  if (prevPrivate && !req.allowReplace) throw new Error(t('bg.accountExists'));
   lock();
   await set({ [K.privateKey]: stagedPrivate, [K.publicKey]: stagedPublic });
+  // The replaced account's key is NOT stashed here. The user was already offered
+  // an explicit pre-replace backup (EXPORT_ACCOUNT_KEY in ExistingAccountGate);
+  // silently keeping another account's private key on disk with no code path
+  // that ever restores it is dead, sensitive data — data minimization wins.
   await del([K.jwt, K.user, K.account, K.stagedPrivateKey, K.stagedPublicKey]);
   // Persist the flow-validated identity NOW (official parity: the account
   // entity exists from setup/recover completion, not from the first sign-in),
@@ -451,7 +486,86 @@ async function setupCommitHandler(req: SetupCommitReq): Promise<StatusResult> {
       /* greet is cosmetic — the next successful unlock writes the real account */
     }
   }
+
+  // SP-11 TOFU anchor: this commit is reached through the emailed setup/recover
+  // link (an out-of-band, one-time-token channel a network MITM does not
+  // control), so it is THE moment to pin the server's key. Every later login
+  // then enforces Stage 0 against this pin. Best-effort — a pin failure must not
+  // undo an otherwise-successful commit; the deferred pin in gpgAuth() is the
+  // fallback, and until a pin exists login simply runs without Stage 0.
+  try {
+    const serverUrl = await get<string>(K.serverUrl);
+    if (serverUrl) await pinServerKey(await apiBase(), serverUrl);
+  } catch (e) {
+    console.warn('[jpb] server-key pin at setup/recover failed', e);
+  }
+
   void broadcastSessionState();
+  return currentStatus();
+}
+
+// ---------------------------------------------------------------------------
+// CHANGE_PASSPHRASE — re-protect the account key at rest
+//
+// Entirely client-side: the passphrase protects the ARMORED PRIVATE KEY on this
+// device and nothing else. The server never held it, so there is nothing to
+// synchronize — no request is made, and neither passphrase leaves this worker.
+//
+// The old passphrase is the authorization: it must decrypt the stored key or
+// the handler refuses. On success the re-encrypted armored key replaces the
+// stored one and the vault LOCKS, both to prove the new passphrase works before
+// the user walks away and to drop the SESSION key from worker memory + the
+// storage.session mirror (setUnlockedKey(null) inside lock()). The handler's own
+// decrypted clones stay on the worker heap until GC — worker-only and never
+// persisted, like every other crypto path here.
+//
+// Deliberately usable while the vault is locked: knowledge of the current
+// passphrase — not an open session — is what gates the change.
+// ---------------------------------------------------------------------------
+async function changePassphraseHandler(req: ChangePassphraseReq): Promise<StatusResult> {
+  const next = req.newPassphrase ?? '';
+  // Never persist an unprotected armored private key (importKey/generateKeyPair
+  // invariant). An empty new passphrase would produce exactly that.
+  if (next.length === 0) throw new Error(t('bg.newPassphraseRequired'));
+
+  const armored = await get<string>(K.privateKey);
+  if (!armored) throw new Error(t('bg.noPrivateKeyImported'));
+
+  let stored: openpgp.PrivateKey;
+  try {
+    stored = await openpgp.readPrivateKey({ armoredKey: armored });
+  } catch {
+    throw new Error(t('bg.storedKeyCorrupt'));
+  }
+
+  let decrypted: openpgp.PrivateKey;
+  try {
+    decrypted = await openpgp.decryptKey({
+      privateKey: stored,
+      passphrase: req.currentPassphrase ?? '',
+    });
+  } catch {
+    throw new Error(t('bg.incorrectPassphrase'));
+  }
+
+  const reencrypted = await openpgp.encryptKey({ privateKey: decrypted, passphrase: next });
+  const rearmored = reencrypted.armor();
+
+  // Round-trip the result before it replaces a working key: a re-armored blob
+  // that cannot be parsed back — or that came back unprotected — would lock the
+  // user out of their own vault permanently (the server has no copy).
+  const verify = await openpgp.readPrivateKey({ armoredKey: rearmored });
+  if (verify.isDecrypted()) throw new Error(t('bg.keyNotProtected'));
+  try {
+    await openpgp.decryptKey({ privateKey: verify, passphrase: next });
+  } catch {
+    throw new Error(t('bg.passphraseChangeFailed'));
+  }
+
+  await set({ [K.privateKey]: rearmored });
+  // Force a re-unlock with the NEW passphrase; also wipes the decrypted key from
+  // memory and the storage.session mirror, and broadcasts 'locked'.
+  lock();
   return currentStatus();
 }
 
@@ -459,6 +573,7 @@ export const authHandlers: HandlerMap = {
   SETUP_GENERATE_KEY: setupGenerateKeyHandler,
   SETUP_IMPORT_KEY: setupImportKeyHandler,
   SETUP_COMMIT: setupCommitHandler,
+  CHANGE_PASSPHRASE: changePassphraseHandler,
   MFA_VERIFY: mfaVerifyHandler,
   UNLOCK: unlockHandler,
   GET_STATUS: getStatusHandler,

@@ -1,14 +1,17 @@
 import { StrictMode, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Copy, ExternalLink, KeyRound, LogIn, Plus, Settings, Search } from 'lucide-react';
+import { ExternalLink, KeyRound, Plus, Settings, Search } from 'lucide-react';
 import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import {
-  Btn, CreateResourceForm, Flow, Header, Spinner, initials, useStatus, useVault,
+  Btn, CreateResourceForm, Flow, Header, useStatus, useVault,
 } from '../ui/components';
 import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
+import type { QuickFilter, QuickFilterKind, QuickGroup } from '../shared/rpc/vault';
 import { t } from '../shared/i18n';
+import { ResourceList } from './ResourceList';
+import { BrowseSection, FilterList, GroupList, NavBar, filterLabel } from './Browse';
 
 // Detached mode: this popup was re-opened as a standalone window (chrome.windows
 // .create). In that case `currentWindow` is the popup itself, so the originating
@@ -33,6 +36,16 @@ async function openVault() {
   await chrome.tabs.create({ url: chrome.runtime.getURL('app.html') });
 }
 
+/**
+ * The popup has no router, so the recovery-request flow (a guest hash route of
+ * the extension app) is opened as a full tab. Used by the onboarding card and by
+ * the lock screen's "sign in with another account" link.
+ */
+async function openRecover() {
+  await chrome.tabs.create({ url: chrome.runtime.getURL('app.html') + '#/recover' });
+  window.close();
+}
+
 /** The content page tab this quickaccess acts on (the detached tab, else active). */
 async function pageTab(): Promise<chrome.tabs.Tab | null> {
   if (DETACHED && DETACHED_TAB_ID != null) {
@@ -55,13 +68,79 @@ async function detach() {
   window.close();
 }
 
+// ---------------------------------------------------------------------------
+// navigation — the popup has no router, so screens are a plain view stack
+// ---------------------------------------------------------------------------
+type View =
+  | { kind: 'home' }
+  | { kind: 'filters' }
+  | { kind: 'groups' }
+  | { kind: 'filter'; filter: QuickFilterKind }
+  | { kind: 'group'; group: QuickGroup };
+
+/** The drill-down title shown in the return bar ('home' never renders one). */
+function viewTitle(v: View): string {
+  switch (v.kind) {
+    case 'filters': return t('qa.filters');
+    case 'groups': return t('qa.groups');
+    case 'filter': return filterLabel(v.filter);
+    case 'group': return v.group.name;
+    case 'home': return '';
+  }
+}
+
+/**
+ * A server-filtered credential list (Favorites / Items I own / Recently
+ * modified / Shared with me / one group). Every filter is resolved in the
+ * background — the popup never issues HTTP itself.
+ */
+function FilteredView({ filter, empty, onFill, onCopy, onError }: {
+  filter: QuickFilter;
+  empty: string;
+  onFill: (id: string) => void;
+  onCopy: (id: string) => void;
+  onError: (message: string) => void;
+}) {
+  const [items, setItems] = useState<VaultItem[] | null>(null);
+  // `filter` is a fresh object literal on every parent render, so it cannot be
+  // the dependency — this stable projection of it is.
+  const fkey = filter.kind === 'group' ? `group:${filter.groupId}` : filter.kind;
+
+  useEffect(() => {
+    let alive = true;
+    setItems(null);
+    void (async () => {
+      try {
+        const r = await rpc({ type: 'LIST_FILTERED', filter });
+        if (alive) setItems(r.items);
+      } catch (e) {
+        if (!alive) return;
+        setItems([]);
+        onError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    return () => { alive = false; };
+    // Re-fetch only when the selection itself changes (see fkey above).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fkey]);
+
+  return <ResourceList items={items} empty={empty} onFill={onFill} onCopy={onCopy} />;
+}
+
 function Quickaccess() {
   const { items, err, reload } = useVault(true);
   const [matches, setMatches] = useState<VaultItem[] | null>(null);
   const [q, setQ] = useState('');
   const [flash, setFlash] = useState<string | null>(null);
-  // Non-null -> show the create form, prefilled from the current page (⑩).
+  const [navErr, setNavErr] = useState<string | null>(null);
+  // Non-null -> show the create form, prefilled from the current page.
   const [creating, setCreating] = useState<Partial<CreateResourceInput> | null>(null);
+  // Bottom of the stack is always 'home'; pushing drills down, popping returns.
+  const [stack, setStack] = useState<View[]>([{ kind: 'home' }]);
+  const view = stack[stack.length - 1];
+
+  const push = (v: View) => { setNavErr(null); setStack((s) => [...s, v]); };
+  const back = () => { setNavErr(null); setStack((s) => (s.length > 1 ? s.slice(0, -1) : s)); };
 
   const startCreate = async () => {
     const tab = await pageTab();
@@ -102,6 +181,8 @@ function Quickaccess() {
     setTimeout(() => setFlash(null), 2500);
     if (!DETACHED) window.close(); // keep the detached window open for further actions
   };
+  // Decryption happens in the background service worker only — the popup asks
+  // for the reveal and hands the plaintext straight back for the clipboard.
   const copy = async (id: string) => {
     try {
       const { secret } = await rpc({ type: 'REVEAL', id });
@@ -110,22 +191,6 @@ function Quickaccess() {
     } catch (e) { setFlash(e instanceof Error ? e.message : String(e)); }
     setTimeout(() => setFlash(null), 2500);
   };
-
-  const Row = ({ i }: { i: VaultItem }) => (
-    <div className="jpb-row" onClick={() => fill(i.id)} title={t('vault.fillThisLogin')}>
-      <div className="jpb-row-icon">{initials(i.name)}</div>
-      <div className="jpb-row-main">
-        <div className="jpb-row-name">{i.name}</div>
-        <div className="jpb-row-sub">{i.username || i.uri || t('common.dash')}</div>
-      </div>
-      {/* Stop propagation so the action buttons don't also trigger the row's
-          fill-and-close click handler (double FILL / interrupted copy). */}
-      <div className="jpb-row-actions" onClick={(e) => e.stopPropagation()}>
-        <Btn small variant="ghost" title={t('vault.copyPassword')} onClick={(e) => { e.stopPropagation(); void copy(i.id); }}><Copy size={14} /></Btn>
-        <Btn small variant="ghost" title={t('vault.fillLogin')} onClick={(e) => { e.stopPropagation(); void fill(i.id); }}><LogIn size={14} /></Btn>
-      </div>
-    </div>
-  );
 
   if (creating) {
     return (
@@ -138,52 +203,101 @@ function Quickaccess() {
     );
   }
 
-  return (
-    <>
-      <div style={{ position: 'relative' }}>
-        <Search size={15} style={{ position: 'absolute', left: 10, top: 10, color: 'var(--text-muted)' }} />
-        <input className="jpb-search" style={{ paddingLeft: 32 }} placeholder={t('vault.searchPlaceholder')} value={q} onChange={(e) => setQ(e.target.value)} autoFocus />
-      </div>
-      {flash ? <div className="jpb-ok">{flash}</div> : null}
-      {err ? <div className="jpb-error">{err}</div> : null}
-
-      {matches && matches.length > 0 && !q ? (
+  // ---- screens ------------------------------------------------------------
+  let screen: React.ReactNode;
+  if (view.kind === 'home') {
+    screen = q ? (
+      <ResourceList items={items ? filtered : null} empty={t('vault.noMatching')} onFill={fill} onCopy={copy} />
+    ) : (
+      <>
         <div>
-          <div className="jpb-label" style={{ marginBottom: 4 }}>{t('vault.forThisSite')}</div>
-          <div className="jpb-list">{matches.map((i) => <Row key={'m' + i.id} i={i} />)}</div>
+          <div className="jpb-section">{t('qa.suggested')}</div>
+          {/* No match for the current page -> the official empty line, which
+              points the user at the search field right above. */}
+          <ResourceList items={matches} empty={t('qa.noSuggestions')} onFill={fill} onCopy={copy} />
         </div>
-      ) : null}
+        <BrowseSection onFilters={() => push({ kind: 'filters' })} onGroups={() => push({ kind: 'groups' })} />
+      </>
+    );
+  } else if (view.kind === 'filters') {
+    screen = <FilterList onPick={(filter) => push({ kind: 'filter', filter })} />;
+  } else if (view.kind === 'groups') {
+    screen = <GroupList onPick={(group) => push({ kind: 'group', group })} onError={setNavErr} />;
+  } else if (view.kind === 'filter') {
+    screen = (
+      <FilteredView
+        filter={{ kind: view.filter }}
+        empty={t('qa.emptyList')}
+        onFill={fill}
+        onCopy={copy}
+        onError={setNavErr}
+      />
+    );
+  } else {
+    screen = (
+      <FilteredView
+        filter={{ kind: 'group', groupId: view.group.id }}
+        empty={t('qa.emptyGroup')}
+        onFill={fill}
+        onCopy={copy}
+        onError={setNavErr}
+      />
+    );
+  }
 
-      <div>
-        {!q && matches && matches.length > 0 ? <div className="jpb-label" style={{ marginBottom: 4 }}>{t('vault.allPasswords')}</div> : null}
-        {!items ? <Spinner label={t('flow.loadingVault')} /> :
-          filtered.length === 0 ? <div className="jpb-empty">{t('vault.noMatching')}</div> :
-            <div className="jpb-list">{filtered.map((i) => <Row key={i.id} i={i} />)}</div>}
-      </div>
+  return (
+    <div className="jpb-qa">
+      {view.kind === 'home' ? (
+        <div className="jpb-searchwrap">
+          <input
+            className="jpb-search"
+            placeholder={t('vault.searchPlaceholder')}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            autoFocus
+          />
+          <span className="jpb-search-ico"><Search size={15} /></span>
+        </div>
+      ) : (
+        <NavBar title={viewTitle(view)} onBack={back} onClose={() => window.close()} />
+      )}
 
-      <div style={{ display: 'flex', gap: 8 }}>
-        <Btn block variant="primary" onClick={startCreate}><Plus size={14} /> {t('common.new')}</Btn>
-        <Btn block onClick={() => void openVault()}><KeyRound size={14} /> {t('vault.openVault')}</Btn>
-        <Btn block variant="ghost" onClick={() => reload(true)}>{t('common.refresh')}</Btn>
+      {flash ? <div className="jpb-ok">{flash}</div> : null}
+      {/* A drill-down's own failure takes precedence over the background LIST's. */}
+      {(navErr ?? err) ? <div className="jpb-error">{navErr ?? err}</div> : null}
+
+      <div className="jpb-qa-scroll">{screen}</div>
+
+      {/* Pinned on every screen, exactly like the official popup. */}
+      <div className="jpb-qa-foot">
+        <Btn block variant="primary" onClick={startCreate}><Plus size={14} /> {t('qa.createNew')}</Btn>
       </div>
-    </>
+    </div>
   );
 }
 
 function Popup() {
   const { status, setStatus } = useStatus();
   const onChange = (s: StatusResult) => setStatus(s);
-  const lock = async () => setStatus(await rpc({ type: 'LOCK' }));
+  // The header's power button ends the SESSION (official quickaccess parity):
+  // LOGOUT locks and drops the JWT but KEEPS the account key, so the popup lands
+  // on the unlock screen rather than back at onboarding.
+  const signOut = async () => setStatus(await rpc({ type: 'LOGOUT' }));
   return (
     <div className="jpb-shell">
       <Header
         account={status?.account ?? null}
-        onLock={status?.phase === 'unlocked' ? lock : undefined}
+        onSignOut={status?.phase === 'unlocked' ? signOut : undefined}
         right={
           <>
             {!DETACHED ? (
               <Btn small variant="ghost" title={t('header.openSeparateWindow')} onClick={detach}>
                 <ExternalLink size={14} />
+              </Btn>
+            ) : null}
+            {status?.phase === 'unlocked' ? (
+              <Btn small variant="ghost" title={t('vault.openVault')} onClick={() => void openVault()}>
+                <KeyRound size={14} />
               </Btn>
             ) : null}
             <Btn small variant="ghost" title={t('header.settings')} onClick={() => chrome.runtime.openOptionsPage()}>
@@ -193,7 +307,7 @@ function Popup() {
         }
       />
       <div className="jpb-body">
-        <Flow status={status} onChange={onChange}>
+        <Flow status={status} onChange={onChange} onRecover={() => void openRecover()}>
           <Quickaccess />
         </Flow>
       </div>

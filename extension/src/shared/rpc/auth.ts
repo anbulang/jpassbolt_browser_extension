@@ -30,12 +30,22 @@ export type AuthReq =
   // the flow-validated identity (from setup/recover start): official Passbolt
   // creates the account entity at completion — not at first sign-in — so the
   // unlock screen can greet the user (name + email) before any UNLOCK ran.
+  // `allowReplace` must be set explicitly when a private key already exists on
+  // this device — the background REFUSES to overwrite an account key without it
+  // (defence-in-depth behind the setup/recovery replace-confirmation gate).
   | {
       type: 'SETUP_COMMIT';
       account?: { userId: string; username: string; fullName: string };
+      allowReplace?: boolean;
     }
   // Without armoredKey: info about the account's own public key.
   | { type: 'KEY_INFO'; armoredKey?: string }
+  // Re-protect the account private key with a new passphrase. PURELY LOCAL: the
+  // key is decrypted with `currentPassphrase` and re-encrypted with
+  // `newPassphrase` inside the worker — neither passphrase, nor the decrypted
+  // key, ever reaches the server or any UI context. The vault is LOCKED on
+  // success, so the next unlock must use the new passphrase.
+  | { type: 'CHANGE_PASSPHRASE'; currentPassphrase: string; newPassphrase: string }
   // Login-time MFA challenge; the pending JWT lives ONLY in background memory.
   | { type: 'MFA_VERIFY'; provider: 'totp'; code: string; remember?: boolean };
 
@@ -44,5 +54,7 @@ export interface AuthRespMap {
   SETUP_IMPORT_KEY: { fingerprint: string; publicKeyArmored: string };
   SETUP_COMMIT: StatusResult;
   KEY_INFO: KeyInfo;
+  /** Always phase:'locked' — the change re-locks the vault by design. */
+  CHANGE_PASSPHRASE: StatusResult;
   MFA_VERIFY: StatusResult;
 }

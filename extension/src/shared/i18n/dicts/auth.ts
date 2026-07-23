@@ -15,6 +15,45 @@ import type { Dict } from '../types';
 export const en: Dict = {
   'app.auth.brand': 'JPassbolt',
 
+  // Shown under the .asc key-backup textareas (setup import / recovery verify),
+  // which now display the armored key in plain text.
+  'app.auth.plaintextBackupNote':
+    'The key is shown in plain text — mind your surroundings.',
+
+  // ---- security token picker (setup passphrase step / recovery verify step) -
+  'app.auth.securityToken.label': 'Your security token',
+  'app.auth.securityToken.hint':
+    'Pick three characters and a colour you will recognise instantly. From now on JPassbolt shows this mark every time it asks for your passphrase — a fake page cannot know it.',
+  'app.auth.securityToken.codeAria': 'Security token characters',
+  'app.auth.securityToken.colorAria': 'Security token colour',
+  'app.auth.securityToken.invalid': 'The token must be exactly 3 letters or digits.',
+  'app.auth.securityToken.saveFailed':
+    'Your security token could not be saved on this device — everything else is set up. You can choose it again in Settings → Security token.',
+
+  // ---- existing-account replace gate (setup / recovery complete mode) -------
+  'app.auth.gate.loading': 'Checking this device…',
+  'app.auth.gate.title': 'This device is already linked to an account',
+  'app.auth.gate.subtitle':
+    'Finishing this setup or recovery link will bind this browser to a different account.',
+  'app.auth.gate.boundIdentity': 'Linked account',
+  'app.auth.gate.unknownAccount': 'Unknown account',
+  'app.auth.gate.usernameLabel': 'Username',
+  'app.auth.gate.serverLabel': 'Server',
+  'app.auth.gate.fingerprintLabel': 'Key fingerprint',
+  'app.auth.gate.warning':
+    'Continuing REPLACES this account and deletes its private key from this device. Without a backup, that account’s data can never be decrypted again — the server does not store private keys.',
+  'app.auth.gate.kitTitle': 'Back up this device’s private key first',
+  'app.auth.gate.kitDesc':
+    'Exports the private key already stored on THIS device for the account above — nothing is downloaded from the server. Save it before this recovery overwrites it.',
+  'app.auth.gate.kitSaved': 'Backup downloaded — keep it somewhere safe and offline',
+  'app.auth.gate.download': 'Download',
+  'app.auth.gate.downloading': 'Exporting…',
+  'app.auth.gate.exportFailed': 'Could not export the key backup. Please try again.',
+  'app.auth.gate.ack':
+    'I understand the risk and have backed up the private key of the account shown above.',
+  'app.auth.gate.continue': 'I understand the risk — continue',
+  'app.auth.gate.back': 'Back',
+
   // ---- setup flow ----------------------------------------------------------
   'app.auth.setup.steps.invite': 'Invite',
   'app.auth.setup.steps.key': 'Key',
@@ -50,7 +89,6 @@ export const en: Dict = {
   'app.auth.setup.passphrase.subtitle':
     'Used to unlock your private key on this device. It never leaves the device and cannot be recovered.',
   'app.auth.setup.passphrase.label': 'Passphrase',
-  'app.auth.setup.passphrase.placeholder': '••••••••••••',
   'app.auth.setup.passphrase.strength': 'Strength',
   'app.auth.setup.passphrase.confirmLabel': 'Re-enter',
   'app.auth.setup.passphrase.mismatch': "The two entries don't match",
@@ -63,6 +101,8 @@ export const en: Dict = {
   'app.auth.setup.passphrase.processing': 'Processing…',
   'app.auth.setup.passphrase.generateKey': 'Generate key',
   'app.auth.setup.passphrase.next': 'Next',
+  'app.auth.setup.passphrase.pwnedWarning':
+    'This passphrase appeared in {{count}} known data breaches — consider choosing another. You can still continue.',
   'app.auth.setup.done.title': 'Your identity is ready',
   'app.auth.setup.done.subtitle':
     'Your key has been generated and encrypted locally. Click to enter the vault and activate your account.',
@@ -74,6 +114,8 @@ export const en: Dict = {
   'app.auth.setup.done.activating': 'Activating…',
   'app.auth.setup.done.enterVault': 'Enter vault',
   'app.auth.setup.done.note': 'Your private key and passphrase never left this device',
+  'app.auth.setup.done.activated':
+    'Your account is active and this device is signed in — open your vault to continue',
   'app.auth.setup.errors.missingLink':
     'Invalid link: missing user_id or token. Please use the complete invitation link from your email.',
   'app.auth.setup.errors.inviteInvalid':
@@ -134,7 +176,6 @@ export const en: Dict = {
   'app.auth.recovery.verify.chooseBackup': 'Choose .asc backup',
   'app.auth.recovery.verify.keyPlaceholder': '-----BEGIN PGP PRIVATE KEY BLOCK-----',
   'app.auth.recovery.verify.passphraseLabel': 'Passphrase for this backup',
-  'app.auth.recovery.verify.passphrasePlaceholder': '••••••••••••',
   'app.auth.recovery.verify.backToLogin': 'Back to sign in',
   'app.auth.recovery.verify.verifyingKey': 'Verifying key…',
   'app.auth.recovery.verify.next': 'Next',
@@ -203,6 +244,41 @@ export const en: Dict = {
 export const zh: Dict = {
   'app.auth.brand': 'JPassbolt',
 
+  // 显示在 .asc 密钥备份文本框下方(设置导入 / 恢复验证),这两处现以明文显示 armored 密钥。
+  'app.auth.plaintextBackupNote': '内容将以明文显示,请注意周围环境。',
+
+  // ---- security token picker (setup passphrase step / recovery verify step) -
+  'app.auth.securityToken.label': '你的安全令牌',
+  'app.auth.securityToken.hint':
+    '挑三个字符和一个你一眼就能认出的颜色。此后 JPassbolt 每次向你索要口令时都会展示这个标记 —— 仿冒页面无从得知它。',
+  'app.auth.securityToken.codeAria': '安全令牌字符',
+  'app.auth.securityToken.colorAria': '安全令牌颜色',
+  'app.auth.securityToken.invalid': '令牌必须恰好为 3 个字母或数字。',
+  'app.auth.securityToken.saveFailed':
+    '安全令牌未能保存到此设备 —— 其余设置均已完成。你可以稍后在「设置 → 安全令牌」中重新选择。',
+
+  // ---- existing-account replace gate (setup / recovery complete mode) -------
+  'app.auth.gate.loading': '正在检查此设备…',
+  'app.auth.gate.title': '此设备已绑定另一个账号',
+  'app.auth.gate.subtitle': '完成这个设置或恢复链接，会把本浏览器改绑到另一个账号。',
+  'app.auth.gate.boundIdentity': '当前绑定身份',
+  'app.auth.gate.unknownAccount': '未知账号',
+  'app.auth.gate.usernameLabel': '用户名',
+  'app.auth.gate.serverLabel': '服务器',
+  'app.auth.gate.fingerprintLabel': '密钥指纹',
+  'app.auth.gate.warning':
+    '继续将替换此账号并删除其本机私钥；若无备份，该账号数据将永久无法解密（服务器不保存私钥）。',
+  'app.auth.gate.kitTitle': '先备份本设备的私钥',
+  'app.auth.gate.kitDesc':
+    '导出的是本设备上已保存的上述账号私钥 —— 不会从服务器下载任何东西。请在本次恢复覆盖它之前先保存。',
+  'app.auth.gate.kitSaved': '备份已下载 — 请离线妥善保存',
+  'app.auth.gate.download': '下载备份',
+  'app.auth.gate.downloading': '正在导出…',
+  'app.auth.gate.exportFailed': '导出密钥备份失败，请重试。',
+  'app.auth.gate.ack': '我已了解风险，并已备份上述账号的私钥。',
+  'app.auth.gate.continue': '我已了解风险，继续',
+  'app.auth.gate.back': '返回',
+
   // ---- setup flow ----------------------------------------------------------
   'app.auth.setup.steps.invite': '邀请',
   'app.auth.setup.steps.key': '密钥',
@@ -236,7 +312,6 @@ export const zh: Dict = {
   'app.auth.setup.passphrase.subtitle':
     '用于在本设备解锁私钥。它本身永不离开设备，也无法被找回。',
   'app.auth.setup.passphrase.label': 'passphrase',
-  'app.auth.setup.passphrase.placeholder': '••••••••••••',
   'app.auth.setup.passphrase.strength': '强度',
   'app.auth.setup.passphrase.confirmLabel': '再次输入',
   'app.auth.setup.passphrase.mismatch': '两次输入不一致',
@@ -249,6 +324,8 @@ export const zh: Dict = {
   'app.auth.setup.passphrase.processing': '处理中…',
   'app.auth.setup.passphrase.generateKey': '生成密钥',
   'app.auth.setup.passphrase.next': '下一步',
+  'app.auth.setup.passphrase.pwnedWarning':
+    '此口令曾在 {{count}} 次已知数据泄露中出现，建议更换。你仍可继续。',
   'app.auth.setup.done.title': '身份已就绪',
   'app.auth.setup.done.subtitle':
     '你的密钥已生成并在本地加密。点击进入保险库以激活账户。',
@@ -259,6 +336,7 @@ export const zh: Dict = {
   'app.auth.setup.done.activating': '正在激活…',
   'app.auth.setup.done.enterVault': '进入保险库',
   'app.auth.setup.done.note': '私钥与 passphrase 从未离开此设备',
+  'app.auth.setup.done.activated': '账户已激活，本设备已登录 — 点击进入你的保险库',
   'app.auth.setup.errors.missingLink':
     '链接无效：缺少 user_id 或 token。请使用邮件中的完整邀请链接。',
   'app.auth.setup.errors.inviteInvalid': '邀请链接无效或已过期，请联系管理员重新邀请。',
@@ -315,7 +393,6 @@ export const zh: Dict = {
   'app.auth.recovery.verify.chooseBackup': '选择 .asc 备份',
   'app.auth.recovery.verify.keyPlaceholder': '-----BEGIN PGP PRIVATE KEY BLOCK-----',
   'app.auth.recovery.verify.passphraseLabel': '该备份的 passphrase',
-  'app.auth.recovery.verify.passphrasePlaceholder': '••••••••••••',
   'app.auth.recovery.verify.backToLogin': '返回登录',
   'app.auth.recovery.verify.verifyingKey': '校验密钥…',
   'app.auth.recovery.verify.next': '下一步',

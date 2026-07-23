@@ -42,6 +42,7 @@ import type {
 import { rpc } from '../../../shared/messages';
 import { observedEntropy } from '../../../ui/components';
 import { t } from '../../../shared/i18n';
+import { joinName, initialsFromNames } from '../../../shared/names';
 import { getResourcePermissions } from '../../services/permissions';
 import { listComments, addComment } from '../../services/comments';
 import { useToast } from '../../lib/toast';
@@ -72,15 +73,8 @@ export function tileColor(seed: string): string {
 export function tileLetter(name: string): string {
   return name.replace(/^[^A-Za-z一-龥]*/, '').slice(0, 1).toUpperCase() || '•';
 }
-function initialsFrom(first?: string | null, last?: string | null, fallback?: string | null): string {
-  const f = (first || '').trim();
-  const l = (last || '').trim();
-  if (f || l) return `${f.charAt(0)}${l.charAt(0)}`.toUpperCase() || '?';
-  const n = (fallback || '').trim();
-  if (!n) return '?';
-  const parts = n.split(/[\s@._-]+/).filter(Boolean);
-  return (parts.length >= 2 ? `${parts[0][0]}${parts[1][0]}` : n.slice(0, 2)).toUpperCase();
-}
+/** 头像缩写:复用 shared/names 逻辑(CJK 顺序正确、无「张张」重复)。 */
+const initialsFrom = initialsFromNames;
 
 /**
  * Map entropy bits to the SecretField 4-bar meter level. Thresholds are the
@@ -647,7 +641,7 @@ export function SecretPanel({
                   const isGroup = p.aro === 'Group';
                   const name = isGroup
                     ? p.group?.name ?? tf('app.vault.panel.groupFallback', '群组')
-                    : [p.user?.profile?.first_name, p.user?.profile?.last_name].filter(Boolean).join(' ') ||
+                    : joinName(p.user?.profile?.first_name, p.user?.profile?.last_name) ||
                       p.user?.username ||
                       tf('app.vault.panel.userFallback', '用户');
                   const email = isGroup
@@ -706,7 +700,7 @@ export function SecretPanel({
               comments.map((c) => {
                 const author = c.creator;
                 const name =
-                  [author?.profile?.first_name, author?.profile?.last_name].filter(Boolean).join(' ') ||
+                  joinName(author?.profile?.first_name, author?.profile?.last_name) ||
                   author?.username ||
                   tf('app.vault.panel.userFallback', '用户');
                 return (

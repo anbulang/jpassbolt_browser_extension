@@ -61,8 +61,6 @@
   transition: border-color .14s, box-shadow .14s;
 }
 .jpb-textarea:focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--surface); }
-/* Chrome-only (this is a Chrome extension): render sensitive text as dots. */
-.jpb-masked { -webkit-text-security: disc; }
 .jpb-keychip {
   display: flex; align-items: center; box-sizing: border-box; width: 100%;
   border: 1px solid var(--border); border-radius: var(--r); padding: 11px 13px;
@@ -156,3 +154,61 @@
 .jpb-strength.strong { background: var(--green-soft); color: var(--green-text); }
 .jpb-strength.very-strong { background: var(--accent-soft); color: var(--accent-text); }
 .jpb-totp-clock { font-family: var(--mono); font-size: 12px; color: var(--text-3); min-width: 34px; text-align: right; }
+
+/* ---------------------------------------------------------------------------
+ * quickaccess (official Passbolt popup LAYOUT, existing jpb-* skin)
+ *
+ * Content scrolls; the "Create new" button is pinned to the bottom of the panel
+ * on every screen (home + drill-downs). Everything below reuses the tokens and
+ * components already defined above — no new design language, only the structure
+ * the official popup has.
+ * ------------------------------------------------------------------------- */
+.jpb-qa { display: flex; flex-direction: column; gap: 12px; flex: 1; min-height: 0; }
+/*
+ * max-height inherits the intent of `.jpb-popup .jpb-list`'s 320px cap, which
+ * this panel overrides below: an action popup is sized to its CONTENT and hard-
+ * capped by Chrome at 600px, so without a bound here a long list would push the
+ * pinned footer past that ceiling and scroll it out of reach. 372px keeps the
+ * tallest screen at ~576px (header 59 + padding 32 + search 40 + gaps 24 + foot
+ * 49). Deliberately a fixed px: `vh` in a content-sized popup resolves against a
+ * viewport that does not exist until after layout.
+ */
+.jpb-qa-scroll {
+  flex: 1; min-height: 0; max-height: 372px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 14px;
+}
+/* The pinned footer. Sits outside .jpb-qa-scroll, so it never scrolls away. */
+.jpb-qa-foot { flex: none; padding-top: 12px; border-top: 1px solid var(--border); }
+
+/* The lists live inside .jpb-qa-scroll, which owns the scrolling now, so the
+   panel-wide `.jpb-popup .jpb-list { max-height: 320px }` cap would cut them
+   short and nest a second scrollbar. Equal specificity, later rule wins. */
+.jpb-qa .jpb-list { max-height: none; overflow-y: visible; }
+
+/* section headings ("Suggested" / "Browse") */
+.jpb-section {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-3); margin-bottom: 6px;
+}
+
+/* drill-down return bar: "‹ Title ×" */
+.jpb-navbar { display: flex; align-items: center; gap: 6px; flex: none; }
+.jpb-navbar-title {
+  flex: 1; min-width: 0; font-size: 13px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* search field with the magnifier on the RIGHT (official) */
+.jpb-searchwrap { position: relative; flex: none; }
+.jpb-searchwrap .jpb-search { padding-right: 36px; }
+.jpb-searchwrap .jpb-search-ico {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  color: var(--text-3); pointer-events: none; display: flex;
+}
+
+/* navigational rows ("Filters ›" / "Groups ›" / a filter / a group) — the
+   vault .jpb-row with a smaller glyph tile and a trailing chevron. */
+.jpb-row-icon-sm { width: 30px; height: 30px; border-radius: 9px; }
+.jpb-row-icon-sm svg { width: 15px; height: 15px; }
+.jpb-row-chev { flex: none; display: flex; color: var(--text-3); }
+.jpb-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }

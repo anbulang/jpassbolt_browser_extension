@@ -10,6 +10,13 @@ import type { Dict } from '../types';
 export const en: Dict = {
   'app.components.share.title': 'Share resource',
   'app.components.share.titleNamed': 'Share "{{name}}"',
+  'app.components.share.titleFolder': 'Share folder',
+  'app.components.share.titleFolderNamed': 'Share folder "{{name}}"',
+  // Mirrors PermissionService.shareFolder: sharing a folder only writes the
+  // Folder ACO + folders_relations — it does NOT cascade to the credentials
+  // inside it, so a new recipient receives an EMPTY folder at their root.
+  'app.components.share.folderNote':
+    'Folders hold no secret — only access rights change. Sharing a folder does not share the credentials inside it.',
   'app.components.share.accessorCount': '{{count}} people with access',
   'app.components.share.simulate': 'Simulate',
   'app.components.share.simulating': 'Simulating…',
@@ -58,6 +65,10 @@ export const en: Dict = {
 export const zh: Dict = {
   'app.components.share.title': '共享资源',
   'app.components.share.titleNamed': '共享「{{name}}」',
+  'app.components.share.titleFolder': '共享文件夹',
+  'app.components.share.titleFolderNamed': '共享文件夹「{{name}}」',
+  'app.components.share.folderNote':
+    '文件夹不含密文，仅变更访问权限。共享文件夹不会同时共享其中的凭据。',
   'app.components.share.accessorCount': '{{count}} 个访问者',
   'app.components.share.simulate': '模拟',
   'app.components.share.simulating': '模拟中…',
