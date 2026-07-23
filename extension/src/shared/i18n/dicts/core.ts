@@ -24,7 +24,26 @@ export const en: Dict = {
   // header / chrome
   'header.settings': 'Settings',
   'header.lockVault': 'Lock vault',
+  'header.signOut': 'Sign out',
   'header.openSeparateWindow': 'Open in a separate window',
+
+  // quickaccess browse (official popup layout: Suggested / Browse / drill-downs)
+  'qa.suggested': 'Suggested',
+  'qa.noSuggestions': 'No passwords found for the current page. You can use the search.',
+  'qa.browse': 'Browse',
+  'qa.filters': 'Filters',
+  'qa.groups': 'Groups',
+  'qa.createNew': 'Create new',
+  'qa.back': 'Back',
+  'qa.close': 'Close',
+  'qa.filter.favorites': 'Favorites',
+  'qa.filter.owned': 'Items I own',
+  'qa.filter.recent': 'Recently modified',
+  'qa.filter.shared': 'Shared with me',
+  'qa.emptyList': 'No passwords in this list.',
+  'qa.emptyGroup': 'No passwords are shared with this group.',
+  'qa.noGroups': 'You are not a member of any group.',
+  'qa.loadingGroups': 'Loading groups…',
 
   // flow / spinners
   'flow.loading': 'Loading…',
@@ -37,16 +56,11 @@ export const en: Dict = {
   'server.placeholder': 'https://passbolt.example.com',
   'server.saving': 'Saving…',
 
-  // key import form
-  'key.title': 'Import your private key',
-  'key.intro':
-    'Paste your passphrase-protected OpenPGP private key. It is stored only in the extension and never leaves your browser.',
-  'key.label': 'Armored private key',
-  'key.placeholder': '-----BEGIN PGP PRIVATE KEY BLOCK-----',
-  'key.fileLoaded': 'Key file loaded: {{name}}',
-  'key.clearFile': 'Remove',
-  'key.importing': 'Importing…',
-  'key.import': 'Import key',
+  // no-account onboarding card (replaces the retired arbitrary key-import form)
+  'noaccount.title': 'This device has no account yet',
+  'noaccount.body':
+    'Open the invitation or recovery link from your email to finish setting up this device. No email yet?',
+  'noaccount.sendRecovery': 'Send a recovery email',
 
   // unlock form
   'unlock.title': 'Unlock your vault',
@@ -56,7 +70,11 @@ export const en: Dict = {
   'unlock.signIn': 'Sign in',
   'unlock.lostPassphrase': 'Help, I lost my passphrase.',
   'unlock.recoverSent': 'Recovery email sent — check your mailbox.',
-  'unlock.switchAccount': 'Or switch to another account.',
+  'unlock.switchAccount': 'Sign in with another account? Send a recovery email.',
+
+  // anti-phishing security token badge (shown inside every passphrase field)
+  'securityToken.badgeAria':
+    'Your security token — check it before typing your passphrase. If it does not match the one you set, this page may be a phishing fake.',
 
   // quickaccess / vault list
   'vault.searchPlaceholder': 'Search vault…',
@@ -155,7 +173,12 @@ export const en: Dict = {
   'options.session': 'Session',
   'options.status': 'Status',
   'options.lockVault': 'Lock vault',
-  'options.removeAccount': 'Remove account',
+  'options.signOut': 'Sign out',
+  'options.removeAccount': 'Remove account from this device',
+  'options.removeAccountHint':
+    'Signing out only ends this session — your key stays on this device. Removing the account deletes its private key from this browser: without your own recovery kit backup, the data it protects can never be decrypted again. The server does NOT store your private key.',
+  'options.removeAccountConfirm':
+    'Remove this account from this device?\n\nIts private key will be deleted from this browser. Make sure you have already saved your private-key recovery kit — the server does NOT keep a copy, so without that backup the account’s data can never be decrypted again.',
   'options.about': 'About',
   'options.aboutBody':
     "JPassbolt browser extension — an Aegis-styled, Passbolt-compatible E2EE client. Your private key and all decryption run only inside the extension's background service worker; web pages never see your key or passphrase. The vault auto-locks after 15 minutes of inactivity.",
@@ -166,9 +189,9 @@ export const en: Dict = {
 
   // options flashes
   'options.flash.vaultLocked': 'Vault locked.',
+  'options.flash.loggedOut': 'Signed out. Your key stays on this device.',
   'options.flash.accountRemoved': 'Account removed from this browser.',
   'options.flash.serverSaved': 'Server saved.',
-  'options.flash.keyImported': 'Key imported.',
   'options.flash.languageChanged': 'Language updated.',
 
   // vault phases (status display)
@@ -197,10 +220,16 @@ export const en: Dict = {
   'bg.sessionExpired': 'Session expired. Please unlock again.',
   'bg.noAccountMatchesKey': 'No account on the server matches this key.',
   'bg.noChallengeToken': 'Server did not return a GPGAuth challenge token.',
+  'bg.badChallengeFormat':
+    'The server sent a malformed login challenge. Nothing was sent back — this server may be compromised.',
+  'bg.serverKeyMismatch':
+    "The server's key has changed and could not be verified. Login was stopped to protect you — this server may have been tampered with. Re-open your invitation or recovery email link to re-establish trust.",
+  'bg.serverKeyPinFailed': 'Could not fetch or verify the server key.',
   'bg.authFailedNoJwt': 'Authentication failed: no JWT returned.',
   'bg.encryptedItem': '(encrypted item)',
   'bg.vaultLocked': 'Vault is locked.',
   'bg.resourceNotFound': 'Resource not found.',
+  'bg.invalidGroupId': 'Invalid group id.',
   'bg.publicKeyUnavailable':
     'Your public key is unavailable. Re-import your key in Settings.',
   'bg.nameRequired': 'A name is required.',
@@ -211,8 +240,13 @@ export const en: Dict = {
     'This private key is not passphrase-protected. JPassbolt refuses to store an unprotected key.',
   'bg.noServerConfiguredShort': 'No server configured.',
   'bg.noPrivateKeyImported': 'No private key imported yet.',
+  'bg.accountExists':
+    'This device is already linked to an account; replacing it requires an explicit confirmation.',
   'bg.storedKeyCorrupt': 'Stored private key is corrupt. Re-import it in Settings.',
   'bg.incorrectPassphrase': 'Incorrect passphrase.',
+  'bg.newPassphraseRequired': 'A new passphrase is required.',
+  'bg.passphraseChangeFailed':
+    'The re-protected key could not be verified. Your passphrase was NOT changed.',
   'bg.noTotpConfigured': 'This item has no TOTP configured.',
   'bg.noActiveTab': 'No active tab.',
   'bg.requiresTabContext': 'This action requires a tab context.',
@@ -247,7 +281,26 @@ export const zh: Dict = {
   // header / chrome
   'header.settings': '设置',
   'header.lockVault': '锁定密码库',
+  'header.signOut': '退出登录',
   'header.openSeparateWindow': '在独立窗口中打开',
+
+  // quickaccess browse (official popup layout: Suggested / Browse / drill-downs)
+  'qa.suggested': '当前页面建议',
+  'qa.noSuggestions': '未找到与当前页面匹配的密码，可以使用搜索。',
+  'qa.browse': '浏览',
+  'qa.filters': '筛选',
+  'qa.groups': '群组',
+  'qa.createNew': '新建密码',
+  'qa.back': '返回',
+  'qa.close': '关闭',
+  'qa.filter.favorites': '收藏',
+  'qa.filter.owned': '我拥有的',
+  'qa.filter.recent': '最近修改',
+  'qa.filter.shared': '共享给我的',
+  'qa.emptyList': '此列表中没有密码。',
+  'qa.emptyGroup': '没有密码共享给该群组。',
+  'qa.noGroups': '你还不属于任何群组。',
+  'qa.loadingGroups': '正在加载群组…',
 
   // flow / spinners
   'flow.loading': '加载中…',
@@ -261,16 +314,10 @@ export const zh: Dict = {
   'server.saving': '正在保存…',
 
 
-  // key import form
-  'key.title': '导入你的私钥',
-  'key.intro':
-    '粘贴受口令保护的 OpenPGP 私钥。它仅保存在扩展内部，绝不会离开你的浏览器。',
-  'key.label': '装甲格式私钥',
-  'key.placeholder': '-----BEGIN PGP PRIVATE KEY BLOCK-----',
-  'key.fileLoaded': '已加载密钥文件：{{name}}',
-  'key.clearFile': '移除',
-  'key.importing': '正在导入…',
-  'key.import': '导入私钥',
+  // no-account onboarding card (replaces the retired arbitrary key-import form)
+  'noaccount.title': '本设备尚未配置账号',
+  'noaccount.body': '请打开邮件中的邀请或恢复链接完成配置；没有收到邮件？',
+  'noaccount.sendRecovery': '发送恢复邮件',
 
   // unlock form
   'unlock.title': '解锁你的密码库',
@@ -280,7 +327,11 @@ export const zh: Dict = {
   'unlock.signIn': '登录',
   'unlock.lostPassphrase': '忘记口令？发送恢复邮件',
   'unlock.recoverSent': '恢复邮件已发送，请查收邮箱。',
-  'unlock.switchAccount': '或改用其他账户',
+  'unlock.switchAccount': '用其他账户登录？发送恢复邮件',
+
+  // anti-phishing security token badge (shown inside every passphrase field)
+  'securityToken.badgeAria':
+    '你的安全令牌 — 输入主口令前请先核对。若与你设置的不一致，此页面可能是钓鱼仿冒。',
 
   // quickaccess / vault list
   'vault.searchPlaceholder': '搜索密码库…',
@@ -378,7 +429,12 @@ export const zh: Dict = {
   'options.session': '会话',
   'options.status': '状态',
   'options.lockVault': '锁定密码库',
-  'options.removeAccount': '移除账户',
+  'options.signOut': '退出登录',
+  'options.removeAccount': '从此设备移除账号',
+  'options.removeAccountHint':
+    '「退出登录」只结束本次会话，私钥仍留在本设备。「从此设备移除账号」会删除本浏览器中的私钥：若没有自己保存的私钥恢复包备份，该账号的数据将永远无法再解密。服务器不保存你的私钥。',
+  'options.removeAccountConfirm':
+    '确定要从此设备移除账号吗？\n\n本浏览器中的私钥将被删除。移除前请确认已备份私钥恢复包——服务器不保存你的私钥，没有备份就再也无法解密该账号的数据。',
   'options.about': '关于',
   'options.aboutBody':
     'JPassbolt 浏览器扩展 — 一个 Aegis 风格、与 Passbolt 兼容的端到端加密客户端。你的私钥及所有解密操作仅在扩展的后台 service worker 中进行；网页永远看不到你的私钥或口令。密码库在 15 分钟无操作后会自动锁定。',
@@ -389,9 +445,9 @@ export const zh: Dict = {
 
   // options flashes
   'options.flash.vaultLocked': '密码库已锁定。',
+  'options.flash.loggedOut': '已退出登录，私钥仍保留在本设备。',
   'options.flash.accountRemoved': '已从此浏览器移除账户。',
   'options.flash.serverSaved': '服务器已保存。',
-  'options.flash.keyImported': '私钥已导入。',
   'options.flash.languageChanged': '语言已更新。',
 
   // vault phases (status display)
@@ -419,10 +475,15 @@ export const zh: Dict = {
   'bg.sessionExpired': '会话已过期，请重新解锁。',
   'bg.noAccountMatchesKey': '服务器上没有账户与此密钥匹配。',
   'bg.noChallengeToken': '服务器未返回 GPGAuth 质询令牌。',
+  'bg.badChallengeFormat': '服务器下发的登录质询格式非法，已中止且未回传任何内容——该服务器可能已被入侵。',
+  'bg.serverKeyMismatch':
+    '服务器密钥已变更且无法验证。为保护你，登录已中止——该服务器可能被篡改。请重新打开邮件里的邀请/恢复链接以重新建立信任。',
+  'bg.serverKeyPinFailed': '无法获取或验证服务器密钥。',
   'bg.authFailedNoJwt': '认证失败：未返回 JWT。',
   'bg.encryptedItem': '(加密条目)',
   'bg.vaultLocked': '密码库已锁定。',
   'bg.resourceNotFound': '未找到该资源。',
+  'bg.invalidGroupId': '无效的群组 ID。',
   'bg.publicKeyUnavailable': '你的公钥不可用。请在设置中重新导入私钥。',
   'bg.nameRequired': '名称为必填项。',
   'bg.passwordRequired': '密码为必填项。',
@@ -431,8 +492,11 @@ export const zh: Dict = {
   'bg.keyNotProtected': '该私钥未受口令保护。JPassbolt 拒绝保存未受保护的私钥。',
   'bg.noServerConfiguredShort': '尚未配置服务器。',
   'bg.noPrivateKeyImported': '尚未导入私钥。',
+  'bg.accountExists': '此设备已绑定账号，替换需显式确认。',
   'bg.storedKeyCorrupt': '已存储的私钥已损坏。请在设置中重新导入。',
   'bg.incorrectPassphrase': '口令不正确。',
+  'bg.newPassphraseRequired': '请输入新口令。',
+  'bg.passphraseChangeFailed': '重新加密后的密钥未通过校验，口令未被更改。',
   'bg.noTotpConfigured': '该条目未配置 TOTP。',
   'bg.noActiveTab': '没有活动标签页。',
   'bg.requiresTabContext': '此操作需要标签页上下文。',

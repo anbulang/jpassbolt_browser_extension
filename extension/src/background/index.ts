@@ -31,7 +31,9 @@ import type {
 } from '../shared/messages';
 import { generateTotp, isValidTotp } from '../shared/totp';
 import { pwnedCount } from '../shared/pwned';
+import { SECURITY_TOKEN_KEY } from '../shared/securityToken';
 import { t } from '../shared/i18n';
+import { joinName } from '../shared/names';
 import {
   K,
   get,
@@ -59,6 +61,7 @@ import { decryptMessage, encryptForSelf } from './crypto';
 import type { HandlerMap } from './registry';
 import { coreHandlers } from './handlers/core';
 import { vaultHandlers } from './handlers/vault';
+import { quickaccessHandlers } from './handlers/quickaccess';
 import { shareHandlers } from './handlers/share';
 import { groupsHandlers } from './handlers/groups';
 import { authHandlers } from './handlers/auth';
@@ -78,7 +81,7 @@ void chrome.storage.local.remove('app_origin').catch(() => undefined);
 void broadcastSessionState();
 
 // ONE-SHOT healing for pre-fix storage states: an account key without a
-// persisted AccountInfo (SETUP_COMMIT / IMPORT_KEY used to DELETE 'account',
+// persisted AccountInfo (SETUP_COMMIT used to DELETE 'account',
 // and only a successful login wrote it back — so a browser that committed a
 // recovery but never unlocked showed a greet-less passphrase screen forever).
 // Backfill a best-effort identity from the stored PUBLIC key's user ID; the
@@ -138,7 +141,7 @@ const pendingSaves = new Map<number, PendingSave>();
 const PENDING_SAVE_TTL_MS = 3 * 60_000;
 registerLockHook(() => pendingSaves.clear()); // never retain captured plaintext past a lock
 // Also purge on every UNLOCK (session-reset): the account may have changed via
-// IMPORT_KEY/recovery without a lock in between — plaintext captured under the
+// setup/recovery without a lock in between — plaintext captured under the
 // previous account must never be committable into the new account's vault.
 registerSessionResetHook(() => pendingSaves.clear());
 
@@ -388,8 +391,7 @@ interface RawUser {
 }
 
 function buildAccount(serverUrl: string, user: RawUser, fingerprint: string): AccountInfo {
-  const p = user.profile;
-  const fullName = p ? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() : user.username;
+  const fullName = joinName(user.profile?.first_name, user.profile?.last_name) || user.username;
   // verified: built from the server-authoritative /users/me.json after a real
   // sign-in, so it may drive network actions (lost-passphrase POST) — unlike the
   // cosmetic greet writers, which leave verified falsy.
@@ -428,57 +430,6 @@ function parseUserID(uid: string): { email: string; name: string } | null {
   }
   const bare = uid.trim();
   return /^[^\s<>@]+@[^\s<>@]+$/.test(bare) ? { email: bare, name: '' } : null;
-}
-
-/** Validate + persist the armored private key (must be passphrase-protected). */
-async function importKey(armoredPrivateKey: string): Promise<StatusResult> {
-  let key: openpgp.PrivateKey;
-  try {
-    key = await openpgp.readPrivateKey({ armoredKey: armoredPrivateKey });
-  } catch {
-    throw new Error(t('bg.invalidPrivateKey'));
-  }
-  if (key.isDecrypted()) {
-    throw new Error(t('bg.keyNotProtected'));
-  }
-  // A (possibly different) identity replaces whatever account lived here —
-  // mirror SETUP_GENERATE_KEY: tear down any live session FIRST. lock() fires
-  // every registered hook (pendingSaves plaintext, pending MFA, shared metadata
-  // key, import/export staging, vault caches), then the previous account's
-  // credentials are dropped so the next UNLOCK runs a fresh GpgAuth with THIS
-  // key instead of reusing a JWT minted for the previous one — a stale session
-  // must never be able to write state captured under account A into account B.
-  lock();
-  await set({
-    [K.privateKey]: armoredPrivateKey,
-    [K.publicKey]: key.toPublic().armor(),
-  });
-  await del([K.jwt, K.user, K.account]);
-  // Best-effort identity from the key's primary user ID ("Name <email>") so
-  // the unlock screen can greet the user before the first successful UNLOCK
-  // (which replaces this with the server-authoritative account). userId stays
-  // empty and verified falsy — every consumer treats it as display-only.
-  // Fully swallowed (like setupCommitHandler's sibling block): the key is ALREADY
-  // persisted above, so a throw here must never reject importKey and strand the
-  // user on an "import failed" screen for a key that actually imported fine.
-  try {
-    const id = await identityFromKey(key);
-    if (id) {
-      const serverUrl = (await get<string>(K.serverUrl)) ?? '';
-      const account: AccountInfo = {
-        serverUrl,
-        username: id.email,
-        fullName: id.name || id.email,
-        fingerprint: key.getFingerprint(),
-        userId: '',
-      };
-      await set({ [K.account]: account });
-    }
-  } catch {
-    /* greet is cosmetic — the next successful unlock writes the real account */
-  }
-  void broadcastSessionState();
-  return currentStatus();
 }
 
 /**
@@ -535,11 +486,56 @@ async function unlock(passphrase: string): Promise<StatusResult> {
   return currentStatus();
 }
 
+/**
+ * End the SESSION (official Passbolt logout semantics): lock, then drop only the
+ * JWT + cached user. The account private/public key and identity are KEPT, so
+ * currentStatus() lands on 'locked' — the returning user just re-enters their
+ * passphrase, they are NOT thrown back to onboarding. Destructive account
+ * removal is REMOVE_ACCOUNT below.
+ */
 async function logout(): Promise<StatusResult> {
+  lock(); // wipes the in-memory key + every session-scoped hook; broadcasts 'locked'
+  await del([K.jwt, K.user]);
+  void broadcastSessionState(); // resolves to 'locked' (account key retained)
+  return currentStatus();
+}
+
+/**
+ * Forget the account on THIS device: lock, then delete the private/public key,
+ * JWT, cached user, account identity, and any staged/replaced key slots. This is
+ * irreversible without the user's own offline key backup — the server never
+ * holds the private key — so every UI entry point confirms before calling it.
+ */
+async function removeAccount(): Promise<StatusResult> {
   lock();
-  await del([K.privateKey, K.publicKey, K.jwt, K.user, K.account]);
+  await del([
+    K.privateKey,
+    K.publicKey,
+    K.jwt,
+    K.user,
+    K.account,
+    K.stagedPrivateKey,
+    K.stagedPublicKey,
+    // The security token is account-scoped anti-phishing state: forgetting the
+    // account must forget it too, or the NEXT account on this device inherits
+    // the previous user's chosen mark and the mark stops meaning anything.
+    SECURITY_TOKEN_KEY,
+  ]);
   void broadcastSessionState(); // now resolves to 'logged_out' (key removed)
   return currentStatus();
+}
+
+/**
+ * Export the account's key material for an offline recovery-kit download. The
+ * armored private key is passphrase-protected at rest (the same trust level as
+ * the official Passbolt account kit); the caller writes it only to local disk.
+ */
+async function exportAccountKey(): Promise<{ privateKeyArmored: string; publicKeyArmored: string; username: string }> {
+  const privateKeyArmored = await get<string>(K.privateKey);
+  if (!privateKeyArmored) throw new Error(t('bg.noPrivateKeyImported'));
+  const publicKeyArmored = (await get<string>(K.publicKey)) ?? '';
+  const account = await get<AccountInfo>(K.account);
+  return { privateKeyArmored, publicKeyArmored, username: account?.username ?? '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -679,6 +675,7 @@ async function copyToClipboard(text: string, clearAfterMs: number): Promise<void
 const handlers: HandlerMap = {
   ...coreHandlers,
   ...vaultHandlers,
+  ...quickaccessHandlers,
   ...shareHandlers,
   ...groupsHandlers,
   ...authHandlers,
@@ -706,22 +703,36 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
       const nextUrl = req.serverUrl.trim();
       const prevUrl = (await get<string>(K.serverUrl)) ?? '';
       await set({ [K.serverUrl]: nextUrl });
-      if (prevUrl && prevUrl !== nextUrl) {
+      // "The server changed" means a different ORIGIN — not a trailing-slash or
+      // case-only re-entry of the same URL. A raw string compare would tear the
+      // session down AND drop the SP-11 pin for a cosmetic edit, needlessly
+      // reopening a TOFU re-pin window on the next login. Compare origins; fall
+      // back to string inequality only when a URL is unparseable.
+      let originChanged = prevUrl !== nextUrl;
+      if (prevUrl && originChanged) {
+        try {
+          originChanged = new URL(prevUrl).origin !== new URL(nextUrl).origin;
+        } catch {
+          /* unparseable — keep the conservative string-inequality result */
+        }
+      }
+      if (prevUrl && originChanged) {
         // The server actually changed: the live session, JWT, cached user /
         // account and the shared v5 metadata key all belong to the OLD server.
         // lock() clears every session-scoped hook (metadata key included) so a
         // later UNLOCK can never encrypt new-server data to the old server's
         // metadata key; the old JWT/user/account are dropped alongside. The
         // account PRIVATE key is kept — pointing an existing account at a moved
-        // server must not destroy the key.
+        // server must not destroy the key. The SP-11 server-key pin is dropped
+        // too: it was bound to the OLD origin (a new server is a new trust root),
+        // and the next login re-pins the new one TOFU. getPinnedServerKey's
+        // origin guard is the backstop; clearing it here just avoids stale data.
         lock();
-        await del([K.jwt, K.user, K.account]);
+        await del([K.jwt, K.user, K.account, K.serverKey]);
         void broadcastSessionState();
       }
       return currentStatus();
     }
-    case 'IMPORT_KEY':
-      return importKey(req.armoredPrivateKey);
     case 'UNLOCK':
       return unlock(req.passphrase);
     case 'LOCK':
@@ -729,6 +740,10 @@ async function handle(req: Req, sender: chrome.runtime.MessageSender): Promise<u
       return currentStatus();
     case 'LOGOUT':
       return logout();
+    case 'REMOVE_ACCOUNT':
+      return removeAccount();
+    case 'EXPORT_ACCOUNT_KEY':
+      return exportAccountKey();
     case 'OPEN_QUICKACCESS':
       return openQuickaccess();
     case 'LIST':

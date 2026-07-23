@@ -13,7 +13,7 @@ import type { EmailNotificationSettings } from '../../../../shared/types';
 import { describeApiError } from '../../../lib/errors';
 import { useToast } from '../../../lib/toast';
 import { tf } from '../../../lib/i18n';
-import { CardSpinner, ErrorBanner } from '../OrgPoliciesSection';
+import { CardSpinner, CardErrorBanner as ErrorBanner } from '../cardKit';
 
 /** A notification-toggle key (one of the 25 EmailNotificationSettings flags). */
 type EmailNotifKey = keyof EmailNotificationSettings;

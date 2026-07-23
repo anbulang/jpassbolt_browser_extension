@@ -1,11 +1,11 @@
 import { StrictMode, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Globe, Lock, LogOut, ShieldCheck } from 'lucide-react';
+import { Globe, Lock, LogOut, ShieldCheck, Trash2 } from 'lucide-react';
 import '../ui/base.css';
 import '../ui/aegis.css';
 import '../ui/jpb.css';
 import {
-  Btn, ErrorMsg, Header, KeyImportForm, PasswordGenerator, ServerForm, Spinner, useStatus,
+  Btn, ErrorMsg, Header, PasswordGenerator, ServerForm, Spinner, useStatus,
 } from '../ui/components';
 import { rpc, type StatusResult } from '../shared/messages';
 import { getLocale, setLocale, t, type Locale } from '../shared/i18n';
@@ -20,7 +20,15 @@ function Options() {
 
   const apply = (s: StatusResult, msg: string) => { setStatus(s); setFlash(msg); setTimeout(() => setFlash(null), 2000); };
   const lock = async () => { try { apply(await rpc({ type: 'LOCK' }), t('options.flash.vaultLocked')); } catch (e) { setErr(String(e)); } };
-  const logout = async () => { try { apply(await rpc({ type: 'LOGOUT' }), t('options.flash.accountRemoved')); } catch (e) { setErr(String(e)); } };
+  // Ends the session only: the account key stays, so the next visit lands on the
+  // passphrase screen rather than back at onboarding.
+  const signOut = async () => { try { apply(await rpc({ type: 'LOGOUT' }), t('options.flash.loggedOut')); } catch (e) { setErr(String(e)); } };
+  // Destructive and irreversible without the user's own key backup (the server
+  // never holds the private key) — always confirm before firing.
+  const removeAccount = async () => {
+    if (!window.confirm(t('options.removeAccountConfirm'))) return;
+    try { apply(await rpc({ type: 'REMOVE_ACCOUNT' }), t('options.flash.accountRemoved')); } catch (e) { setErr(String(e)); }
+  };
   const changeLanguage = async (l: Locale) => {
     await setLocale(l);
     setLocaleState(l);
@@ -48,8 +56,6 @@ function Options() {
 
         <ServerForm initial={status.serverUrl} onDone={(s) => apply(s, t('options.flash.serverSaved'))} />
 
-        <KeyImportForm onDone={(s) => apply(s, t('options.flash.keyImported'))} />
-
         <PasswordGenerator />
 
         <div className="jpb-card">
@@ -60,7 +66,15 @@ function Options() {
           </p>
           <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <Btn onClick={lock} disabled={status.phase !== 'unlocked'}><Lock size={14} /> {t('options.lockVault')}</Btn>
-            <Btn onClick={logout}><LogOut size={14} /> {t('options.removeAccount')}</Btn>
+            <Btn onClick={signOut} disabled={status.phase === 'no_server' || status.phase === 'no_account'}>
+              <LogOut size={14} /> {t('options.signOut')}
+            </Btn>
+          </div>
+          <p className="jpb-muted" style={{ marginTop: 16 }}>{t('options.removeAccountHint')}</p>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <Btn onClick={removeAccount} disabled={status.phase === 'no_server' || status.phase === 'no_account'}>
+              <Trash2 size={14} /> {t('options.removeAccount')}
+            </Btn>
           </div>
         </div>
 

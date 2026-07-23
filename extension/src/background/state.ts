@@ -39,6 +39,11 @@ export const K = {
   jwt: 'jwt',
   user: 'user',
   account: 'account',
+  // SP-11 server-key pin: the server's OpenPGP public key + fingerprint bound to
+  // its origin, captured TOFU during setup/recover. Every login runs GpgAuth
+  // Stage 0 against it; a change is refused, not silently accepted. Cleared when
+  // SET_SERVER moves to a different origin (new server = new trust root).
+  serverKey: 'server_key',
   // One-shot marker for the legacy account-identity backfill (index.ts): the
   // heal must run at most once per install, or it would also "heal" states
   // where K.account was deleted ON PURPOSE (SET_SERVER origin change).

@@ -40,9 +40,12 @@ function init(): void {
     document.documentElement.setAttribute('data-jpassbolt-extension', '1');
     document.documentElement.classList.add('jpassbolt-extension');
   } catch { /* not a normal DOM document */ }
-  try {
-    document.documentElement.setAttribute('data-jpassbolt-extension', chrome.runtime.getManifest().version);
-  } catch { /* chrome bridge momentarily unavailable — the static marker above stands */ }
+  // The PRECISE version number is written only on our own configured server origin
+  // (see the exclusion gate below), never to arbitrary http/https pages: leaking it
+  // everywhere lets any site fingerprint "JPassbolt vX.Y.Z installed". The static
+  // '1' marker above already answers the skeleton page's presence check, and the
+  // version write must NOT go in the throwable path or a momentarily-invalidated
+  // chrome bridge could erase the marker.
 
   // --- exclusion gate (fail-closed until status is known) ------------------
   // No listener acts until `ready` is set: before we know the configured server
@@ -61,6 +64,14 @@ function init(): void {
       }
     } catch { /* background unavailable — leave excluded until known */ }
     excludedHere = !!serverOrigin && location.origin === serverOrigin;
+    // On our OWN server origin only, upgrade the presence marker to the precise
+    // version so the server skeleton page can read it. Elsewhere the static '1'
+    // stands — arbitrary sites see presence, never the version.
+    if (excludedHere) {
+      try {
+        document.documentElement.setAttribute('data-jpassbolt-extension', chrome.runtime.getManifest().version);
+      } catch { /* chrome bridge momentarily unavailable — the static '1' marker stands */ }
+    }
     ready = true;
     if (active() && TOP) void checkPendingSave();
   })();

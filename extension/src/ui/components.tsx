@@ -5,9 +5,10 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import { Copy, Dices, Eye, EyeOff, KeyRound, Loader2, Lock, LogIn, Plus, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import { Copy, Dices, Eye, EyeOff, Loader2, Lock, LogIn, Mail, Plus, Power, RefreshCw, Save, Server, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { rpc, type CreateResourceInput, type StatusResult, type VaultItem } from '../shared/messages';
 import { t } from '../shared/i18n';
+import { initialsFromName } from '../shared/names';
 import { generateTotp, isValidTotp, type TotpConfig } from '../shared/totp';
 import {
   DEFAULT_PASSPHRASE_OPTIONS, DEFAULT_PASSWORD_OPTIONS,
@@ -16,6 +17,7 @@ import {
   type PassphraseOptions, type PasswordOptions,
 } from '../shared/passgen';
 import MfaChallenge from '../app/components/MfaChallenge';
+import PassphraseInput from '../app/components/PassphraseInput';
 
 // ---- primitives -----------------------------------------------------------
 export function Btn(props: {
@@ -56,6 +58,22 @@ export function Spinner({ label }: { label?: string }) {
   );
 }
 
+/**
+ * A spinner that stays INVISIBLE for the first ~300ms, then fades in. Used for
+ * the GET_STATUS round-trip on cold start: a sub-300ms answer (the common case)
+ * shows nothing at all rather than a spinner that flashes for one frame — which,
+ * on the full-page surface, is what made the login card blink on every refresh.
+ */
+export function DelayedSpinner({ label, delayMs = 300 }: { label?: string; delayMs?: number }) {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    const h = window.setTimeout(() => setShow(true), delayMs);
+    return () => window.clearTimeout(h);
+  }, [delayMs]);
+  if (!show) return null;
+  return <Spinner label={label} />;
+}
+
 // ---- status hook ----------------------------------------------------------
 export function useStatus() {
   const [status, setStatus] = useState<StatusResult | null>(null);
@@ -66,9 +84,23 @@ export function useStatus() {
   return { status, setStatus, refresh };
 }
 
-// ---- flow forms (server -> import key -> unlock) --------------------------
-export function ServerForm({ initial, onDone }: { initial?: string; onDone: (s: StatusResult) => void }) {
-  const [url, setUrl] = useState(initial ?? 'http://localhost:8080');
+// ---- flow forms (server -> email-token onboarding -> unlock) --------------
+/**
+ * Which surface a flow step renders on. The popup is a 380px panel where the
+ * steps are plain stacked `jpb-card`s ('compact', the default — omitting the
+ * prop keeps the popup's markup byte-for-byte identical). app.html renders them
+ * as a centered 460px aegis `flow-card` overlay ('page'), matching the guest
+ * setup/recovery wizards. Explicit rather than sniffed from viewport width so
+ * the popup can never accidentally inherit the full-page treatment.
+ */
+export type FlowSurface = 'compact' | 'page';
+
+export function ServerForm({ initial, onDone, surface }: {
+  initial?: string;
+  onDone: (s: StatusResult) => void;
+  surface?: FlowSurface;
+}) {
+  const [url, setUrl] = useState(initial ?? 'http://localhost:8090');
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const submit = async () => {
@@ -78,7 +110,9 @@ export function ServerForm({ initial, onDone }: { initial?: string; onDone: (s: 
     finally { setBusy(false); }
   };
   return (
-    <div className="jpb-card">
+    // 'page': FlowFrame's .flow-body already supplies the card + padding, so a
+    // nested .jpb-card here would render a card-in-a-card.
+    <div className={surface === 'page' ? undefined : 'jpb-card'}>
       <div className="jpb-h2"><Server size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('server.title')}</div>
       <p className="jpb-muted">{t('server.intro')}</p>
       <div className="jpb-field" style={{ marginTop: 12 }}>
@@ -91,58 +125,62 @@ export function ServerForm({ initial, onDone }: { initial?: string; onDone: (s: 
   );
 }
 
-export function KeyImportForm({ onDone }: { onDone: (s: StatusResult) => void }) {
-  const [key, setKey] = useState('');
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const submit = async () => {
-    setErr(null); setBusy(true);
-    try { onDone(await rpc({ type: 'IMPORT_KEY', armoredPrivateKey: key })); }
-    catch (e) { setErr(e instanceof Error ? e.message : String(e)); }
-    finally { setBusy(false); }
-  };
-  // Never echo the armored private key back into the UI: file contents go
-  // straight to state and only the file name is shown.
-  const onFile = async (f: File | null) => {
-    if (!f) return;
-    setKey(await f.text());
-    setFileName(f.name);
-  };
-  const clearFile = () => { setKey(''); setFileName(null); };
+/**
+ * The no_account onboarding card. Arbitrary private-key import is deliberately
+ * GONE (official parity: provisioning a new person always goes through an
+ * emailed setup/recovery token, never a pasted key) — this card just points the
+ * user at their invitation/recovery email, with a shortcut to request a recovery
+ * email. `onRecover` routes to the recovery-request flow; when it is absent the
+ * button is hidden (the caller has no reachable recovery route).
+ */
+export function NoAccountGuide({ onRecover, surface }: { onRecover?: () => void; surface?: FlowSurface }) {
   return (
-    <div className="jpb-card">
-      <div className="jpb-h2"><KeyRound size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('key.title')}</div>
-      <p className="jpb-muted">{t('key.intro')}</p>
-      {fileName ? (
-        <div className="jpb-field" style={{ marginTop: 12 }}>
-          <label className="jpb-label">{t('key.label')}</label>
-          <div className="jpb-keychip">
-            <KeyRound size={14} style={{ verticalAlign: '-2px', marginRight: 6 }} />
-            <span>{t('key.fileLoaded', { name: fileName })}</span>
-            <button type="button" className="jpb-link" style={{ marginLeft: 'auto' }} onClick={clearFile}>{t('key.clearFile')}</button>
-          </div>
-        </div>
-      ) : (
-        <div className="jpb-field" style={{ marginTop: 12 }}>
-          <label className="jpb-label">{t('key.label')}</label>
-          {/* jpb-masked renders the pasted key like a password field */}
-          <textarea className="jpb-textarea jpb-masked" value={key} onChange={(e) => setKey(e.target.value)} placeholder={t('key.placeholder')} />
-        </div>
-      )}
-      {fileName ? null : (
-        <input type="file" accept=".asc,.txt,.key,.pgp" onChange={(e) => onFile(e.target.files?.[0] ?? null)} style={{ fontSize: 12, marginBottom: 12 }} />
-      )}
-      <ErrorMsg text={err} />
-      <Btn variant="primary" block onClick={submit} disabled={busy || !key.trim()}>{busy ? t('key.importing') : t('key.import')}</Btn>
+    <div className={surface === 'page' ? undefined : 'jpb-card'}>
+      <div className="jpb-h2"><Mail size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('noaccount.title')}</div>
+      <p className="jpb-muted">{t('noaccount.body')}</p>
+      {onRecover ? (
+        <Btn variant="primary" block onClick={onRecover}>{t('noaccount.sendRecovery')}</Btn>
+      ) : null}
     </div>
   );
 }
 
-export function UnlockForm({ account, onDone, onLogout }: {
+/**
+ * Wraps a flow step in the surface's chrome.
+ *
+ * 'compact' (popup) returns the children untouched — the popup keeps stacking
+ * bare `jpb-card`s inside its own `.jpb-body`, exactly as before.
+ *
+ * 'page' (app.html) reproduces the guest wizards' shell: a fixed, full-viewport
+ * `.flow-overlay` centering a 460px `.flow-card` with the brand header. The card
+ * must stay a DIRECT child of the overlay — `.flow-card{margin:auto}` is what
+ * stops `place-items:center` from clipping the top of over-tall content while
+ * scrolling, and an intermediate wrapper would break it.
+ */
+function FlowFrame({ surface, children }: { surface: FlowSurface; children: ReactNode }) {
+  if (surface === 'compact') return <>{children}</>;
+  return (
+    <div className="flow-overlay">
+      <div className="flow-card">
+        <div className="flow-top">
+          <div className="flow-brand">
+            {/* Bare tag: aegis sizes brand icons via `.flow-brand .lg svg`, so an
+                explicit size= (the jpb-* convention) would break alignment. */}
+            <span className="lg"><ShieldCheck /></span>
+            <span className="bn">{t('app.auth.brand')}</span>
+          </div>
+        </div>
+        <div className="flow-body">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+export function UnlockForm({ account, onDone, onRecover, surface }: {
   account: StatusResult['account'];
   onDone: (s: StatusResult) => void;
-  onLogout: () => void;
+  onRecover?: () => void;
+  surface?: FlowSurface;
 }) {
   const [pass, setPass] = useState('');
   const [err, setErr] = useState<string | null>(null);
@@ -150,8 +188,7 @@ export function UnlockForm({ account, onDone, onLogout }: {
   const [recoverSent, setRecoverSent] = useState(false);
   // Official state-D login card shows WHO is signing in: initials avatar +
   // full name + email, not just a "signed in as" line.
-  const initials = (account?.fullName || account?.username || '?')
-    .split(/[\s.@_-]+/).map((w) => w[0]).filter(Boolean).slice(0, 2).join('').toUpperCase();
+  const initials = initialsFromName(account?.fullName || account?.username || '?');
   const submit = async (e?: React.FormEvent) => {
     e?.preventDefault();
     setErr(null); setBusy(true);
@@ -177,7 +214,9 @@ export function UnlockForm({ account, onDone, onLogout }: {
     }).catch(() => undefined);
   };
   return (
-    <form className="jpb-card" onSubmit={submit}>
+    // 'page': a bare <form> is display:block and contributes no box of its own,
+    // so it drops cleanly into FlowFrame's .flow-body (onSubmit/Enter unchanged).
+    <form className={surface === 'page' ? undefined : 'jpb-card'} onSubmit={submit}>
       <div className="jpb-h2"><Lock size={16} style={{ verticalAlign: '-2px', marginRight: 6 }} />{t('unlock.title')}</div>
       {account ? (
         <div className="jpb-account">
@@ -192,7 +231,11 @@ export function UnlockForm({ account, onDone, onLogout }: {
       )}
       <div className="jpb-field" style={{ marginTop: 12 }}>
         <label className="jpb-label">{t('unlock.passphrase')}</label>
-        <input className="jpb-input" type="password" autoFocus value={pass} onChange={(e) => setPass(e.target.value)} />
+        {/* PassphraseInput anchors the security token badge INSIDE the field (not
+            page chrome a host page could forge) and tints the focus ring to the
+            token's colour — markers a phishing look-alike cannot reproduce
+            (white-paper SP-27). It reads the stored mark itself (no token prop). */}
+        <PassphraseInput value={pass} onChange={setPass} autoFocus compact autoComplete="current-password" />
       </div>
       <ErrorMsg text={err} />
       <Btn type="submit" variant="primary" block disabled={busy || !pass}>{busy ? t('unlock.signingIn') : t('unlock.signIn')}</Btn>
@@ -200,7 +243,12 @@ export function UnlockForm({ account, onDone, onLogout }: {
         {recoverSent
           ? <span className="jpb-muted">{t('unlock.recoverSent')}</span>
           : account?.verified && <button type="button" className="jpb-link" onClick={lostPassphrase}>{t('unlock.lostPassphrase')}</button>}
-        <button type="button" className="jpb-link" onClick={onLogout}>{t('unlock.switchAccount')}</button>
+        {/* Signing in as someone else goes through the emailed recovery token,
+            NOT a one-click account wipe: the local key stays until the new
+            account's setup/recovery flow explicitly confirms replacing it. */}
+        {onRecover ? (
+          <button type="button" className="jpb-link" onClick={onRecover}>{t('unlock.switchAccount')}</button>
+        ) : null}
       </div>
     </form>
   );
@@ -209,14 +257,37 @@ export function UnlockForm({ account, onDone, onLogout }: {
 /**
  * Renders the right onboarding/unlock step for the current phase, or the
  * children once the vault is unlocked. Centralizes the flow for popup + app.
+ *
+ * `onRecover` opens the recovery-request flow. It is caller-supplied because the
+ * route differs per surface: the app iframe navigates its hash router, while the
+ * popup (no router) opens app.html at that route in a tab.
+ *
+ * `surface` picks the chrome (see FlowSurface). It defaults to 'compact' so the
+ * popup keeps its existing rendering without passing anything.
  */
-export function Flow({ status, onChange, children }: {
+export function Flow({ status, onChange, onRecover, children, surface = 'compact' }: {
   status: StatusResult | null;
   onChange: (s: StatusResult) => void;
+  onRecover?: () => void;
+  surface?: FlowSurface;
   children: ReactNode;
 }) {
-  const logout = async () => onChange(await rpc({ type: 'LOGOUT' }));
-  if (!status) return <Spinner label={t('flow.loading')} />;
+  // First paint, before GET_STATUS answers. On 'page' we must NOT render the
+  // flow-card/brand header here: that is the login card's own shell, and showing
+  // it for the one frame before status arrives is exactly what made the login box
+  // blink on every refresh. Render only the .flow-overlay background (same app
+  // gradient) with a DelayedSpinner — a sub-300ms load stays silent. The popup
+  // ('compact') keeps its original framed spinner byte-for-byte.
+  if (!status) {
+    if (surface === 'page') {
+      return (
+        <div className="flow-overlay">
+          <DelayedSpinner label={t('flow.loading')} />
+        </div>
+      );
+    }
+    return <FlowFrame surface={surface}><Spinner label={t('flow.loading')} /></FlowFrame>;
+  }
   // Login-time MFA gate: UNLOCK (or GET_STATUS while a challenge is parked in
   // the worker) reports phase:'locked' + mfa.required — the session's pending
   // JWT lives only in background memory until MFA_VERIFY succeeds. Cancelling
@@ -231,26 +302,54 @@ export function Flow({ status, onChange, children }: {
   }
   switch (status.phase) {
     case 'no_server':
-      return <ServerForm onDone={onChange} />;
-    case 'no_account':
       return (
-        <>
-          <ServerForm initial={status.serverUrl} onDone={onChange} />
-          <KeyImportForm onDone={onChange} />
-        </>
+        <FlowFrame surface={surface}>
+          <ServerForm onDone={onChange} surface={surface} />
+        </FlowFrame>
+      );
+    case 'no_account':
+      // Two steps in one frame. In the popup they are two cards separated by
+      // .jpb-body's gap; inside a single flow-card that gap is gone, so the
+      // second gets the hairline divider used elsewhere in the design system
+      // (.mfa-method + .mfa-method, .session-row + .session-row) — existing
+      // --border token, no new class.
+      return (
+        <FlowFrame surface={surface}>
+          <ServerForm initial={status.serverUrl} onDone={onChange} surface={surface} />
+          {surface === 'page' ? (
+            <div style={{ marginTop: 20, paddingTop: 20, borderTop: '1px solid var(--border)' }}>
+              <NoAccountGuide onRecover={onRecover} surface={surface} />
+            </div>
+          ) : (
+            <NoAccountGuide onRecover={onRecover} surface={surface} />
+          )}
+        </FlowFrame>
       );
     case 'locked':
-      return <UnlockForm account={status.account} onDone={onChange} onLogout={logout} />;
+      return (
+        <FlowFrame surface={surface}>
+          <UnlockForm account={status.account} onDone={onChange} onRecover={onRecover} surface={surface} />
+        </FlowFrame>
+      );
     case 'unlocked':
+      // Never framed: the app hands off to AppLayout, the popup to Quickaccess.
       return <>{children}</>;
     default:
       return null;
   }
 }
 
-export function Header({ account, onLock, right }: {
+export function Header({ account, onLock, onSignOut, right }: {
   account: StatusResult['account'];
   onLock?: () => void;
+  /**
+   * Official quickaccess parity: the power button in the top-right. It ends the
+   * SESSION (LOGOUT semantics — locks and drops the JWT, keeps the account key),
+   * which is what the official popup's power icon does. Rendered last so it sits
+   * at the far right like the original. Callers that want the padlock instead
+   * keep passing `onLock`; passing both renders both.
+   */
+  onSignOut?: () => void;
   right?: ReactNode;
 }) {
   return (
@@ -264,6 +363,9 @@ export function Header({ account, onLock, right }: {
       {right}
       {onLock ? (
         <Btn small variant="ghost" onClick={onLock} title={t('header.lockVault')}><Lock size={14} /></Btn>
+      ) : null}
+      {onSignOut ? (
+        <Btn small variant="ghost" onClick={onSignOut} title={t('header.signOut')}><Power size={14} /></Btn>
       ) : null}
     </header>
   );

@@ -10,6 +10,7 @@ import { avatarUrl } from '../../services/profile';
 import { Modal } from '../../components/Modal';
 import { Avatar } from '../../components/Avatar';
 import { Badge, type BadgeVariant } from '../../components/Badge';
+import { joinName } from '../../../shared/names';
 import { t } from '../../../shared/i18n';
 
 /** Shorthand: translate under the users directory namespace. */
@@ -22,11 +23,7 @@ export const tu = (key: string, vars?: Record<string, string | number>): string 
 
 /** Best-effort full name from a profile, falling back to the username. */
 export function displayName(user: User): string {
-  const full = [user.profile?.first_name, user.profile?.last_name]
-    .filter(Boolean)
-    .join(' ')
-    .trim();
-  return full || user.username;
+  return joinName(user.profile?.first_name, user.profile?.last_name) || user.username;
 }
 
 export interface UserStatus {
@@ -79,8 +76,8 @@ export function RoleBadge({ roleName }: { roleName?: string }) {
 // ---------------------------------------------------------------------------
 
 export interface UserFormState {
-  first_name: string;
-  last_name: string;
+  /** 单个「姓名」字段;提交时用 splitFullName 拆成后端要求的 first/last。 */
+  name: string;
   username: string;
   role_id: string;
   disabled: boolean;
@@ -170,33 +167,18 @@ export function InviteUserModal({
               required
             />
           </div>
-          <div style={{ display: 'flex', gap: '12px' }}>
-            <div className="form-group" style={{ flex: 1 }}>
-              <label className="form-label" htmlFor="invite-first">
-                {tu('inviteModal.firstNameLabel')}
-              </label>
-              <input
-                id="invite-first"
-                type="text"
-                className="form-control"
-                value={form.first_name}
-                onChange={(e) => setForm({ ...form, first_name: e.target.value })}
-                required
-              />
-            </div>
-            <div className="form-group" style={{ flex: 1 }}>
-              <label className="form-label" htmlFor="invite-last">
-                {tu('inviteModal.lastNameLabel')}
-              </label>
-              <input
-                id="invite-last"
-                type="text"
-                className="form-control"
-                value={form.last_name}
-                onChange={(e) => setForm({ ...form, last_name: e.target.value })}
-                required
-              />
-            </div>
+          <div className="form-group">
+            <label className="form-label" htmlFor="invite-name">
+              {tu('inviteModal.nameLabel')}
+            </label>
+            <input
+              id="invite-name"
+              type="text"
+              className="form-control"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              required
+            />
           </div>
           <div className="form-group" style={{ marginBottom: 0 }}>
             <label className="form-label" htmlFor="invite-role">
@@ -271,33 +253,18 @@ export function EditUserModal({
               style={{ opacity: 0.6 }}
             />
           </div>
-          <div style={{ display: 'flex', gap: '12px' }}>
-            <div className="form-group" style={{ flex: 1 }}>
-              <label className="form-label" htmlFor="edit-first">
-                {tu('editModal.firstNameLabel')}
-              </label>
-              <input
-                id="edit-first"
-                type="text"
-                className="form-control"
-                value={form.first_name}
-                onChange={(e) => setForm({ ...form, first_name: e.target.value })}
-                required
-              />
-            </div>
-            <div className="form-group" style={{ flex: 1 }}>
-              <label className="form-label" htmlFor="edit-last">
-                {tu('editModal.lastNameLabel')}
-              </label>
-              <input
-                id="edit-last"
-                type="text"
-                className="form-control"
-                value={form.last_name}
-                onChange={(e) => setForm({ ...form, last_name: e.target.value })}
-                required
-              />
-            </div>
+          <div className="form-group">
+            <label className="form-label" htmlFor="edit-name">
+              {tu('editModal.nameLabel')}
+            </label>
+            <input
+              id="edit-name"
+              type="text"
+              className="form-control"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+              required
+            />
           </div>
           <div className="form-group">
             <label className="form-label" htmlFor="edit-role">

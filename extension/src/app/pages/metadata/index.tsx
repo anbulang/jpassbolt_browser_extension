@@ -13,6 +13,13 @@
  * Types-settings writes deliberately do NOT notify the background: the
  * RESOURCE_SAVE handler re-fetches /metadata/types/settings.json on every
  * save, so the v4/v5 create decision always sees the fresh policy.
+ *
+ * Two entry points share one body:
+ *   - MetadataPage (default)        the standalone /settings/encrypted-metadata
+ *                                   route, with its own role gate + page chrome;
+ *   - EncryptedMetadataPanel        the bare panel embedded as a section of the
+ *                                   settings page's admin group, which supplies
+ *                                   the chrome and has already gated on isAdmin.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Navigate } from 'react-router-dom';
@@ -75,13 +82,23 @@ export default function MetadataPage() {
     return <Navigate to="/" replace />;
   }
 
-  return <AdminPanel />;
+  return (
+    <div className="page">
+      <div className="scontent" style={{ flex: 1 }}>
+        <div className="scontent-inner" style={{ maxWidth: '720px' }}>
+          <EncryptedMetadataPanel />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ===========================================================================
 // Admin panel — loads all three data sources, renders the three sections.
+// Exported bare (no page/scontent chrome) so the settings page can host it as
+// one of its admin sections; the caller is responsible for the admin gate.
 // ===========================================================================
-function AdminPanel() {
+export function EncryptedMetadataPanel() {
   const [typesSettings, setTypesSettings] = useState<MetadataTypesSettings | null>(null);
   const [keysSettings, setKeysSettings] = useState<MetadataKeysSettings | null>(null);
   const [keys, setKeys] = useState<MetadataKey[]>([]);
@@ -127,48 +144,44 @@ function AdminPanel() {
   );
 
   return (
-    <div className="page">
-      <div className="scontent" style={{ flex: 1 }}>
-        <div className="scontent-inner" style={{ maxWidth: '720px' }}>
-          <h2 className="stitle">{tf(`${M}.title`, '加密元数据')}</h2>
-          <p className="ssub">{tf(`${M}.subtitle`, '用于加密（v5）资源元数据的组织策略与密钥。')}</p>
+    <>
+      <h2 className="stitle">{tf(`${M}.title`, '加密元数据')}</h2>
+      <p className="ssub">{tf(`${M}.subtitle`, '用于加密（v5）资源元数据的组织策略与密钥。')}</p>
 
-          {loading ? (
-            <div className="empty">
-              <span className="spin-ring" style={{ width: 22, height: 22 }} />
-              <p>{tf(`${M}.loading`, '正在加载加密元数据设置……')}</p>
-            </div>
-          ) : error ? (
-            <div
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '14px',
-                alignItems: 'flex-start',
-              }}
-            >
-              <ErrorBanner>{error}</ErrorBanner>
-              <button type="button" className="btn" onClick={() => void load()}>
-                {tf('app.common.actions.retry', '重试')}
-              </button>
-            </div>
-          ) : (
-            <>
-              {typesSettings && (
-                <TypesPolicySection
-                  settings={typesSettings}
-                  hasActiveKey={hasActiveKey}
-                  onSaved={setTypesSettings}
-                />
-              )}
-              {keysSettings && (
-                <KeysSettingsSection settings={keysSettings} onSaved={setKeysSettings} />
-              )}
-              <OrgKeysSection keys={keys} userCount={userCount} />
-            </>
-          )}
+      {loading ? (
+        <div className="empty">
+          <span className="spin-ring" style={{ width: 22, height: 22 }} />
+          <p>{tf(`${M}.loading`, '正在加载加密元数据设置……')}</p>
         </div>
-      </div>
-    </div>
+      ) : error ? (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '14px',
+            alignItems: 'flex-start',
+          }}
+        >
+          <ErrorBanner>{error}</ErrorBanner>
+          <button type="button" className="btn" onClick={() => void load()}>
+            {tf('app.common.actions.retry', '重试')}
+          </button>
+        </div>
+      ) : (
+        <>
+          {typesSettings && (
+            <TypesPolicySection
+              settings={typesSettings}
+              hasActiveKey={hasActiveKey}
+              onSaved={setTypesSettings}
+            />
+          )}
+          {keysSettings && (
+            <KeysSettingsSection settings={keysSettings} onSaved={setKeysSettings} />
+          )}
+          <OrgKeysSection keys={keys} userCount={userCount} />
+        </>
+      )}
+    </>
   );
 }

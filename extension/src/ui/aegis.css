@@ -57,12 +57,6 @@
   width: 3px; height: 20px; border-radius: 3px; background: var(--accent);
 }
 .rail-spacer { flex: 1; }
-.rail-avatar {
-  width: 36px; height: 36px; border-radius: 50%;
-  display: grid; place-items: center; font-size: 12.5px; font-weight: 600;
-  color: #fff; cursor: pointer; border: 2px solid var(--surface);
-  box-shadow: 0 0 0 1px var(--border);
-}
 
 .main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
 /* Scrollable content slot below the topbar. Full-height flex pages (.vault /
@@ -106,6 +100,46 @@
 .tb-btn:hover { background: var(--surface-3); color: var(--text); }
 .tb-btn svg { width: 18px; height: 18px; }
 .tb-lock { border-color: var(--border); background: var(--surface-2); }
+
+/* ---- topbar account entry (avatar + name/email + menu) ---- */
+.topbar-user-wrap { position: relative; }
+.topbar-user {
+  display: flex; align-items: center; gap: 9px;
+  height: 40px; padding: 0 8px 0 4px;
+  border: 1px solid transparent; border-radius: 999px;
+  background: none; cursor: pointer; max-width: 240px;
+  transition: background .14s, border-color .14s;
+}
+.topbar-user:hover, .topbar-user.open { background: var(--surface-2); border-color: var(--border); }
+.topbar-user .tu-text {
+  display: flex; flex-direction: column; align-items: flex-start;
+  min-width: 0; line-height: 1.25;
+}
+.topbar-user .tu-name {
+  font-size: 12.5px; font-weight: 600; color: var(--text);
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar-user .tu-mail {
+  font-size: 11px; color: var(--text-3);
+  max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.topbar-user .tu-caret { width: 15px; height: 15px; color: var(--text-3); flex: 0 0 15px; }
+
+/* top == trigger height: no dead strip between button and menu. */
+.user-menu { right: 0; top: 40px; min-width: 232px; }
+.menu-identity {
+  display: flex; align-items: center; gap: 11px;
+  padding: 11px 12px 12px; cursor: default;
+}
+.menu-identity .mi-text { min-width: 0; }
+.menu-identity .mi-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.menu-identity .mi-mail {
+  font-size: 11.5px; color: var(--text-3); margin-top: 1px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* ============================================================
    Vault — 3 columns
@@ -491,6 +525,15 @@
   transition: border-color .14s, box-shadow .14s;
 }
 .pf-input:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--surface); }
+/* Tinted focus ring: a PassphraseInput carries the security token's colour in
+   --sectoken-c / --sectoken-soft, so the border + glow adopt the user's mark —
+   a coloured focus state a look-alike page cannot reproduce (white-paper SP-27).
+   :not(.err) keeps the red error state (below) winning despite this rule's higher
+   specificity. */
+.pf-input.tokenized:not(.err):focus-within { border-color: var(--sectoken-c); box-shadow: 0 0 0 3px var(--sectoken-soft); }
+/* Compact variant for the 380px popup unlock field. */
+.pf-input.pf-compact { height: 40px; }
+.pf-input.pf-compact input { letter-spacing: 1px; }
 .pf-input.err { border-color: var(--red); box-shadow: 0 0 0 3px var(--red-soft); animation: shake .3s; }
 @keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-5px)} 75%{transform:translateX(5px)} }
 .pf-input svg { width: 17px; height: 17px; color: var(--text-3); flex: 0 0 17px; }
@@ -530,7 +573,6 @@
 .menu button.danger:hover { background: var(--red-soft); }
 .menu button.danger svg { color: var(--red-text); }
 .menu .sep { height: 1px; background: var(--border); margin: 5px 0; }
-.avatar-menu { left: 56px; bottom: 14px; }
 
 /* ============================================================
    Admin pages (Users / Groups / Settings)
@@ -687,9 +729,24 @@
 .reencrypt-banner .mini-prog { width: 120px; height: 5px; border-radius: 3px; background: color-mix(in oklch, var(--accent) 20%, transparent); overflow: hidden; }
 .reencrypt-banner .mini-prog i { display: block; height: 100%; background: var(--accent); border-radius: 3px; transition: width .25s; }
 
-/* Settings */
+/* Settings — "My profile" workspace: back bar + grouped section menu + content */
+.profile-workspace { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.backbar {
+  flex: 0 0 auto; padding: 10px 14px;
+  border-bottom: 1px solid var(--border); background: var(--surface);
+}
+.backbtn {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 32px; padding: 0 12px 0 9px; border-radius: 8px;
+  border: 1px solid transparent; background: none; cursor: pointer;
+  font-size: 13px; font-weight: 500; color: var(--text-2);
+  transition: background .14s, color .14s, border-color .14s;
+}
+.backbtn:hover { background: var(--surface-2); border-color: var(--border); color: var(--text); }
+
 .slayout { flex: 1; display: grid; grid-template-columns: 220px 1fr; min-height: 0; }
-.snav { border-right: 1px solid var(--border); background: var(--surface-2); padding: 16px 12px; }
+.snav { border-right: 1px solid var(--border); background: var(--surface-2); padding: 16px 12px; overflow-y: auto; }
+.snav > div + div { margin-top: 6px; }
 .snav-item { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 9px; cursor: pointer; color: var(--text-2); font-size: 13px; font-weight: 500; background: none; border: none; width: 100%; text-align: left; }
 .snav-item:hover { background: var(--surface-3); }
 .snav-item.on { background: var(--accent-soft); color: var(--accent-text); }
@@ -722,6 +779,55 @@
 
 .fpbox { display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 9px 12px; font-family: var(--mono); font-size: 13px; }
 .fpbox .fpv { flex: 1; letter-spacing: 0.5px; word-break: break-all; }
+
+/* mono value cell in a .srow (key id / algorithm / bits) */
+.srow .sv.keyval { font-family: var(--mono); font-size: 13px; color: var(--text-2); }
+
+/* armored PUBLIC key viewer (keys inspector) — never private material */
+.keybox {
+  width: 100%; min-height: 190px; resize: vertical;
+  border: 1px solid var(--border); border-radius: 9px; padding: 11px 13px;
+  background: var(--surface-2); color: var(--text-2);
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.5;
+  outline: none; white-space: pre; overflow: auto;
+}
+.keybox:focus { border-color: var(--accent-border); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---- security token (anti-phishing marker) ---- */
+.sectoken-input {
+  min-width: 92px; width: 92px; text-align: center;
+  text-transform: uppercase; letter-spacing: 4px; font-weight: 600;
+}
+.sectoken-swatches { display: flex; gap: 7px; flex-wrap: wrap; }
+.sectoken-swatch {
+  width: 26px; height: 26px; border-radius: 7px; cursor: pointer;
+  border: 2px solid transparent; display: grid; place-items: center;
+  box-shadow: 0 0 0 1px var(--border);
+  transition: transform .12s, border-color .12s;
+}
+.sectoken-swatch:hover { transform: scale(1.08); }
+.sectoken-swatch.on { border-color: var(--surface); box-shadow: 0 0 0 2px var(--accent); }
+.sectoken-preview {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 9px 10px 9px 12px;
+}
+.sectoken-preview svg { width: 16px; height: 16px; color: var(--text-3); flex: 0 0 16px; }
+.sectoken-preview .stp-dots {
+  flex: 1; font-family: var(--mono); font-size: 15px; letter-spacing: 2px; color: var(--text-3);
+}
+.sectoken-chip {
+  font-family: var(--mono); font-size: 13px; font-weight: 700; letter-spacing: 1px;
+  padding: 5px 10px; border-radius: 6px; flex: 0 0 auto;
+}
+/* Anti-phishing token badge rendered inside every passphrase field. Colours are
+   set inline (dynamic + focus-inverted); this only owns the invariant chrome. */
+.jpb-sectoken-badge {
+  font-family: var(--mono); font-size: 12px; font-weight: 700; letter-spacing: 1px;
+  padding: 3px 7px; border-radius: 5px; line-height: 1.35;
+  flex: 0 0 auto; text-transform: uppercase; user-select: none; white-space: nowrap;
+  transition: background-color .12s, color .12s;
+}
 
 .qr-setup { display: flex; gap: 24px; padding: 20px 18px; align-items: flex-start; flex-wrap: wrap; }
 .qr {
@@ -941,3 +1047,11 @@
   display: grid; place-items: center; width: 22px; height: 22px; border-radius: 5px;
 }
 .toast-close:hover { background: var(--surface-3); color: var(--text); }
+
+/* ---- security token picker (setup / recovery flows) ----
+   Layout glue only: it lets the settings page's sectoken-* controls sit inside
+   a flow card. Every value comes from the existing token scale — no new design
+   language, and no existing rule is touched. */
+.sectoken-pick { margin-top: 16px; }
+.sectoken-pick-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.5; margin: -2px 0 9px; text-align: left; }
+.sectoken-pick-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }

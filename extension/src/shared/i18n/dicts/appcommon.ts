@@ -53,6 +53,8 @@ export const en: Dict = {
   'app.common.nav.toDark': 'Switch to dark theme',
   'app.common.nav.brand': 'JPassbolt',
   'app.common.nav.extensionOptions': 'Extension options',
+  /** Topbar account-entry placeholder while /users/me.json is in flight. */
+  'app.common.nav.account': 'Account',
   'app.shell.lock.now': 'Lock now',
   'app.shell.auth.invalidKey': 'Invalid GPG private key.',
   'app.shell.auth.keyNotProtected': 'This private key is not protected by a passphrase. For your security, JPassbolt requires a passphrase-protected key. Add a passphrase to your key and try again.',
@@ -223,6 +225,7 @@ export const zh: Dict = {
   'app.common.nav.toDark': '切换到深色',
   'app.common.nav.brand': 'JPassbolt',
   'app.common.nav.extensionOptions': '扩展选项',
+  'app.common.nav.account': '账户',
   'app.shell.lock.now': '立即锁定',
   'app.shell.auth.invalidKey': '无效的 GPG 私钥。',
   'app.shell.auth.keyNotProtected': '此私钥未设置密码保护。为了你的安全，JPassbolt 要求使用带密码保护的私钥。请为你的密钥添加密码后重试。',

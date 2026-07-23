@@ -25,14 +25,12 @@
  * consumed token (and the one-shot staged-key promotion) from being
  * re-submitted so only the UNLOCK is retried.
  */
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   AlertTriangle,
   CheckCircle2,
   Download,
-  Eye,
-  EyeOff,
   Fingerprint,
   KeyRound,
   Lock,
@@ -49,12 +47,22 @@ import { t } from '../../../shared/i18n';
 import type { User } from '../../../shared/types';
 import { requestRecovery, startRecovery, completeRecovery } from '../../services/setup';
 import { describeApiError } from '../../lib/errors';
+import PassphraseInput from '../../components/PassphraseInput';
+import SecurityTokenPicker from '../../components/SecurityTokenPicker';
 import {
+  DEFAULT_SECURITY_TOKEN,
+  getSecurityToken,
+  isValidTokenCode,
+} from '../../../shared/securityToken';
+import {
+  ExistingAccountGate,
   KeyFileButton,
   Stepper,
   accountIdentity,
+  enterVaultHref,
   formatFingerprint,
   fullName,
+  persistSecurityToken,
 } from './flowHelpers';
 
 /** The supported recovery method (CE): re-import the existing key backup. */
@@ -92,7 +100,36 @@ export default function RecoveryPage() {
 
   // Passphrase (unlocks the imported backup at sign-in — NOT a new passphrase).
   const [pf, setPf] = useState('');
-  const [showPf, setShowPf] = useState(false);
+
+  // Security token (anti-phishing mark), confirmed/updated on the verify step.
+  // SEEDED from storage, which matters most here: recovering on the SAME device
+  // returns the user's real mark, so the picker starts equal to the badge shown
+  // inside the passphrase field and the step keeps its original verification
+  // meaning ("is this still my mark?"). Hard-starting at DEFAULT would display
+  // 'JPB' to a user whose mark is not that — a false phishing alarm we would
+  // have manufactured ourselves. On a new device it is DEFAULT, as it should be.
+  const [tokenCode, setTokenCode] = useState(DEFAULT_SECURITY_TOKEN.code);
+  const [tokenColor, setTokenColor] = useState(DEFAULT_SECURITY_TOKEN.color);
+  // Recovery succeeded but the mark could not be stored — non-blocking hint.
+  const [tokenSaveFailed, setTokenSaveFailed] = useState(false);
+  const tokenOk = isValidTokenCode(tokenCode);
+  // Live picker value for the badge below — the mark is only persisted once the
+  // recovery completes, so reading storage would show the stale/default one.
+  const pickedToken = useMemo(
+    () => ({ code: tokenCode, color: tokenColor }),
+    [tokenCode, tokenColor],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void getSecurityToken().then((tk) => {
+      if (cancelled) return;
+      setTokenCode(tk.code);
+      setTokenColor(tk.color);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Fingerprint + public key of the STAGED backup (returned by SETUP_IMPORT_KEY;
   // KEY_INFO would still describe the previous account key at this point).
@@ -107,6 +144,27 @@ export default function RecoveryPage() {
   // done step then routes into the protected shell where Flow shows the
   // challenge (GET_STATUS carries the pending-MFA flag).
   const [mfaPending, setMfaPending] = useState(false);
+  // Set by ExistingAccountGate when this browser already holds an account key and
+  // the user explicitly accepted replacing it; forwarded to SETUP_COMMIT as
+  // `allowReplace`, which the background REQUIRES before overwriting a key.
+  const [replaceConfirmed, setReplaceConfirmed] = useState(false);
+
+  // Server origin for the done step's top-target vault link (see enterVaultHref).
+  const [serverUrl, setServerUrl] = useState('');
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const s = await rpc({ type: 'GET_STATUS' });
+        if (!cancelled) setServerUrl(s.serverUrl);
+      } catch {
+        /* background unreachable — the done step falls back to in-iframe nav */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const emailOk = /\S+@\S+\.\S+/.test(email);
 
@@ -192,8 +250,16 @@ export default function RecoveryPage() {
         // dropping its session). The link-validated identity rides along so
         // the unlock screen greets this user even before the UNLOCK below
         // succeeds (e.g. a mistyped passphrase, or another tab meanwhile).
-        await rpc({ type: 'SETUP_COMMIT', account: accountIdentity(user) });
+        // `allowReplace` carries the gate's explicit consent; without it the
+        // background refuses to overwrite an existing account key.
+        await rpc({ type: 'SETUP_COMMIT', account: accountIdentity(user), allowReplace: replaceConfirmed });
         setCommitted(true);
+        // The account is ours from this line on, so NOW the chosen mark may be
+        // written — and before the UNLOCK below, which may legitimately fail (a
+        // mistyped backup passphrase) and repaint a passphrase prompt: that
+        // prompt must already carry the user's own mark. Never throws (see
+        // persistSecurityToken for the storage-ordering proof).
+        setTokenSaveFailed(!(await persistSecurityToken({ code: tokenCode, color: tokenColor })));
       }
       // recover/complete issues NO JWT (PHP parity) — UNLOCK runs the real
       // GpgAuth with the recovered key. An MFA-enabled account comes back with
@@ -219,6 +285,15 @@ export default function RecoveryPage() {
   };
 
   return (
+    // Only COMPLETE mode (a token link) ends in SETUP_COMMIT and can overwrite an
+    // account key, so only it is gated. REQUEST mode just emails a link — a
+    // signed-in user must still be able to ask for another account's recovery
+    // mail from the lock screen's "sign in with another account".
+    <ExistingAccountGate
+      active={isComplete}
+      confirmed={replaceConfirmed}
+      onConfirm={() => setReplaceConfirmed(true)}
+    >
     <div className="flow-overlay">
       <div className="flow-card">
         <div className="flow-top">
@@ -454,10 +529,10 @@ export default function RecoveryPage() {
                     </span>
                   </div>
                   <textarea
-                    // jpb-masked (-webkit-text-security: disc) hides the pasted
-                    // armored private key like a password field — same shoulder-
-                    // surfing defence KeyImportForm uses (commit dd4a481).
-                    className="flow-textarea jpb-masked"
+                    // Shown in plain text (aligned with official Passbolt): the
+                    // armored backup is itself passphrase-encrypted, and plain text
+                    // lets the user eyeball the BEGIN/END blocks when pasting.
+                    className="flow-textarea"
                     placeholder={t('app.auth.recovery.verify.keyPlaceholder')}
                     value={importArmored}
                     onChange={(e) => setImportArmored(e.target.value)}
@@ -465,22 +540,41 @@ export default function RecoveryPage() {
                     spellCheck={false}
                     style={{ marginTop: 6 }}
                   />
+                  <div className="jpb-muted" style={{ fontSize: 11.5, marginTop: 6 }}>
+                    {t('app.auth.plaintextBackupNote')}
+                  </div>
 
                   <div className="pf-label" style={{ marginTop: 14 }}>
                     <KeyRound size={15} /> {t('app.auth.recovery.verify.passphraseLabel')}
                   </div>
-                  <div className="pf-input">
-                    <Lock size={17} />
-                    <input
-                      type={showPf ? 'text' : 'password'}
-                      value={pf}
-                      placeholder={t('app.auth.recovery.verify.passphrasePlaceholder')}
-                      onChange={(e) => setPf(e.target.value)}
-                    />
-                    <button type="button" className="pf-eye" onClick={() => setShowPf((s) => !s)}>
-                      {showPf ? <EyeOff size={17} /> : <Eye size={17} />}
-                    </button>
-                  </div>
+                  {/* Anti-phishing token (white-paper SP-27): the badge + tinted
+                      focus ring (token={pickedToken}, the picker's live value)
+                      let the user verify their mark before typing the backup's
+                      passphrase. */}
+                  <PassphraseInput
+                    value={pf}
+                    onChange={setPf}
+                    token={pickedToken}
+                    autoComplete="current-password"
+                  />
+
+                  {/* Anti-phishing mark (white-paper SP-27): seeded with the
+                      mark stored on this device, so a same-device recovery just
+                      confirms it. Written only once the server accepted the
+                      recovery (see finishRecovery). Merged into this step
+                      rather than made a 5th one: the flow's step indices are
+                      hardcoded (step === 0..3), so inserting one would mean
+                      renumbering every branch and jump in this file. */}
+                  <SecurityTokenPicker
+                    code={tokenCode}
+                    color={tokenColor}
+                    invalid={!tokenOk}
+                    disabled={loading}
+                    onChange={(tk) => {
+                      setTokenCode(tk.code);
+                      setTokenColor(tk.color);
+                    }}
+                  />
                 </>
               )}
 
@@ -495,6 +589,7 @@ export default function RecoveryPage() {
                     method !== 'backup' ||
                     importArmored.trim().length === 0 ||
                     pf.length === 0 ||
+                    !tokenOk ||
                     loading
                   }
                   onClick={() => void verifyImportAndAdvance()}
@@ -605,13 +700,38 @@ export default function RecoveryPage() {
                 </div>
               </div>
 
-              <button
-                className="btn primary"
-                style={{ width: '100%', height: 44, fontSize: 14 }}
-                onClick={() => navigate('/')}
-              >
-                <Unlock size={16} /> {t('app.auth.recovery.done.enterVault')}
-              </button>
+              {/* The mark could not be stored. Deliberately NOT the error
+                  warnbox: the recovery itself succeeded and only a
+                  display-only preference is missing; it can be set later. */}
+              {tokenSaveFailed && (
+                <div className="warn-soft">
+                  <AlertTriangle /> {t('app.auth.securityToken.saveFailed')}
+                </div>
+              )}
+
+              {/* An MFA challenge lives in the protected shell, so that case stays
+                  inside the iframe. Otherwise use a target="_top" link: the HOST
+                  tab is still on the spent /setup/recover token URL, and the click
+                  (a real user activation) repoints the whole tab at /app, where
+                  appBootstrap re-mounts the vault. */}
+              {!mfaPending && enterVaultHref(serverUrl) ? (
+                <a
+                  className="btn primary"
+                  style={{ width: '100%', height: 44, fontSize: 14, textDecoration: 'none' }}
+                  href={enterVaultHref(serverUrl)}
+                  target="_top"
+                >
+                  <Unlock size={16} /> {t('app.auth.recovery.done.enterVault')}
+                </a>
+              ) : (
+                <button
+                  className="btn primary"
+                  style={{ width: '100%', height: 44, fontSize: 14 }}
+                  onClick={() => navigate('/')}
+                >
+                  <Unlock size={16} /> {t('app.auth.recovery.done.enterVault')}
+                </button>
+              )}
               <div className="flow-note">
                 <ShieldCheck /> {t('app.auth.recovery.done.note')}
               </div>
@@ -620,5 +740,6 @@ export default function RecoveryPage() {
         </div>
       </div>
     </div>
+    </ExistingAccountGate>
   );
 }

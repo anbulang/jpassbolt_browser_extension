@@ -24,6 +24,7 @@ import { Badge } from '../../components/Badge';
 import { ApiError } from '../../lib/api';
 import { describeApiError } from '../../lib/errors';
 import { t } from '../../../shared/i18n';
+import { joinName } from '../../../shared/names';
 import { rpc } from '../../../shared/messages';
 
 import * as groupsService from '../../services/groups';
@@ -37,8 +38,7 @@ import type { Group, GroupUserChange, User } from '../../../shared/types';
 /** Best-effort display name for a user (falls back to username). */
 export function userName(u?: User | null): string {
   if (!u) return t('app.directory.groups.unknownUser');
-  const full = [u.profile?.first_name, u.profile?.last_name].filter(Boolean).join(' ');
-  return full || u.username || t('app.directory.groups.unknownUser');
+  return joinName(u.profile?.first_name, u.profile?.last_name) || u.username || t('app.directory.groups.unknownUser');
 }
 
 /**

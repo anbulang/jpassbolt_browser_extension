@@ -5,18 +5,20 @@
  * encryption and decryption happen in the background worker:
  *   import = IMPORT_STAGE (file bytes up, entry metadata back — never secrets)
  *            → IMPORT_COMMIT in batches of ≤50 (MV3 service-worker liveness)
- *   export = EXPORT_BUILD (finished file comes back as base64; KDBX is
- *            encrypted with a user-chosen passphrase, CSV only behind the
- *            explicit plaintext acknowledgement).
- * The UI's only jobs are file pickup, passphrase input, progress and download.
+ *   export = EXPORT_BUILD (finished file comes back as base64; export is always
+ *            an encrypted KDBX archive protected by a user-chosen passphrase —
+ *            plaintext CSV export was removed).
+ * The UI's only jobs are file pickup, passphrase input, scope, progress and
+ * download.
  */
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowDownUp,
   CheckCircle2,
   Download,
   FileText,
+  FolderTree,
   Lock,
   Upload,
 } from 'lucide-react';
@@ -30,12 +32,26 @@ export interface ImportExportModalProps {
   onClose: () => void;
   /** Ids of the resources currently in scope for export (EXPORT_BUILD resourceIds). */
   resourceIds: string[];
+  /** The folder currently selected in the vault, enabling "current folder" export scope. */
+  currentFolderId?: string | null;
+  /** Display name of that folder (for the scope option label). */
+  currentFolderName?: string;
+  /**
+   * Tab to land on when the modal opens. Omitted = keep whichever tab was last
+   * used (the historical behaviour: reset() deliberately never touched `tab`).
+   */
+  initialTab?: Tab;
+  /**
+   * Export scope to preselect when the modal opens. 'folder' only takes effect
+   * while `currentFolderId` is set; otherwise it falls back to 'all'.
+   */
+  initialExportScope?: ExportScope;
   /** Called after a successful import so the vault reloads. */
   onImported: () => void;
 }
 
 type Tab = 'import' | 'export';
-type ExportFormat = 'kdbx' | 'csv';
+type ExportScope = 'all' | 'folder';
 
 const COMMIT_BATCH = 50;
 
@@ -69,7 +85,16 @@ function downloadBlob(data: BlobPart, filename: string, mime: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-export function ImportExportModal({ open, onClose, resourceIds, onImported }: ImportExportModalProps) {
+export function ImportExportModal({
+  open,
+  onClose,
+  resourceIds,
+  currentFolderId,
+  currentFolderName,
+  initialTab,
+  initialExportScope,
+  onImported,
+}: ImportExportModalProps) {
   const [tab, setTab] = useState<Tab>('import');
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
@@ -79,6 +104,10 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
   // ---- import state ----
   const [file, setFile] = useState<File | null>(null);
   const [kdbxPass, setKdbxPass] = useState('');
+  // The `import-yyyymmdd-HHmmss` reference-folder name the background latched at
+  // stage time; shown in the hierarchy note once known. Null before the first
+  // stage (the note then shows the generic wording).
+  const [rootFolderName, setRootFolderName] = useState<string | null>(null);
   const isKdbxFile = useMemo(() => !!file && /\.kdbx$/i.test(file.name), [file]);
   // Set only if a stage outlived a failed commit run — discarded on close so
   // the background never keeps plaintext staged for a modal nobody looks at.
@@ -98,10 +127,31 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
   } | null>(null);
 
   // ---- export state ----
-  const [exportFormat, setExportFormat] = useState<ExportFormat>('kdbx');
+  const [exportScope, setExportScope] = useState<ExportScope>('all');
   const [exportPass, setExportPass] = useState('');
   const [exportPass2, setExportPass2] = useState('');
-  const [csvAck, setCsvAck] = useState(false);
+
+  // -------------------------------------------------------------------------
+  // On-open presets. This modal stays MOUNTED while closed (`open` is just a
+  // prop; the `if (!open) return null` below sits after the hooks), so state
+  // does not reset by itself — hence the false->true edge check.
+  //
+  // Deliberately NOT reset(): that clears `file`, and an interrupted import
+  // resumes by comparing `resumeRef.current.file === file`. Dropping the file
+  // would silently downgrade a resume into a full re-import (duplicating every
+  // already-committed row). Only the view-level bits are touched here.
+  // -------------------------------------------------------------------------
+  const prevOpen = useRef(false);
+  useEffect(() => {
+    if (open && !prevOpen.current) {
+      // Only force the tab when asked — an unqualified open keeps the last one.
+      if (initialTab) setTab(initialTab);
+      setExportScope(initialExportScope === 'folder' && currentFolderId ? 'folder' : 'all');
+      setError('');
+      setDone(null);
+    }
+    prevOpen.current = open;
+  }, [open, initialTab, initialExportScope, currentFolderId]);
 
   const reset = () => {
     setBusy(false);
@@ -110,9 +160,10 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
     setDone(null);
     setFile(null);
     setKdbxPass('');
+    setRootFolderName(null);
+    setExportScope('all');
     setExportPass('');
     setExportPass2('');
-    setCsvAck(false);
   };
 
   const close = () => {
@@ -151,6 +202,7 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
           kdbxPassword: isKdbxFile ? kdbxPass : undefined,
         });
         pendingImportId.current = staged.importId;
+        if (staged.rootFolderName) setRootFolderName(staged.rootFolderName);
         return staged;
       };
 
@@ -234,27 +286,35 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
   const runExport = async () => {
     setError('');
     setDone(null);
-    if (exportFormat === 'kdbx') {
-      if (exportPass.length < 8) {
-        setError(t('app.vault.ie.errors.exportPassWeak'));
-        return;
-      }
-      if (exportPass !== exportPass2) {
-        setError(t('app.vault.ie.errors.exportPassMismatch'));
-        return;
-      }
-    } else if (!csvAck) {
-      setError(t('app.vault.ie.errors.csvAckRequired'));
+    if (exportPass.length < 8) {
+      setError(t('app.vault.ie.errors.exportPassWeak'));
       return;
     }
+    if (exportPass !== exportPass2) {
+      setError(t('app.vault.ie.errors.exportPassMismatch'));
+      return;
+    }
+
+    // "Current folder" scope only applies when a folder is actually selected;
+    // otherwise the export covers the whole visible vault.
+    //
+    // folderIds is a list of ROOTS, not an enumeration: the background expands
+    // it with subtreeClosure() over the topology it fetches itself
+    // (GET /folders.json?contain[children_resources]=1, handlers/importexport
+    // .ts), then intersects the result with resourceIds. So one id here already
+    // means "this folder AND its whole subtree" — expanding it in the UI would
+    // duplicate that work against a possibly different view of the tree.
+    const folderIds =
+      exportScope === 'folder' && currentFolderId ? [currentFolderId] : undefined;
 
     setBusy(true);
     try {
       const built = await rpc({
         type: 'EXPORT_BUILD',
-        format: exportFormat,
+        format: 'kdbx',
         resourceIds,
-        kdbxPassword: exportFormat === 'kdbx' ? exportPass : undefined,
+        folderIds,
+        kdbxPassword: exportPass,
         dbName: 'JPassbolt Export',
       });
       downloadBlob(b64ToBytes(built.dataB64), built.filename, built.mime);
@@ -344,6 +404,16 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
       {tab === 'import' ? (
         <div>
           <p className="jpb-muted" style={{ marginBottom: 12 }}>{t('app.vault.ie.import.lead')}</p>
+          <div
+            style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 12, fontSize: 12, color: 'var(--text-3)' }}
+          >
+            <FolderTree size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>
+              {rootFolderName
+                ? t('app.vault.ie.import.hierarchyNote', { name: rootFolderName })
+                : t('app.vault.ie.import.hierarchyNoteGeneric')}
+            </span>
+          </div>
           <label
             className="pf-input"
             style={{ cursor: 'pointer', display: 'flex', gap: 10, alignItems: 'center' }}
@@ -372,7 +442,6 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
                 type="password"
                 value={kdbxPass}
                 onChange={(e) => setKdbxPass(e.target.value)}
-                placeholder="••••••••••••"
               />
             </div>
           )}
@@ -391,78 +460,74 @@ export function ImportExportModal({ open, onClose, resourceIds, onImported }: Im
             {t('app.vault.ie.export.lead', { count: resourceIds.length })}
           </p>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <button
-              type="button"
-              className={`pick-opt${exportFormat === 'kdbx' ? ' sel' : ''}`}
-              onClick={() => setExportFormat('kdbx')}
-            >
-              <span className="radio" />
-              <span style={{ minWidth: 0 }}>
-                <strong style={{ display: 'block', fontSize: 13 }}>
-                  {t('app.vault.ie.export.kdbxTitle')}
-                </strong>
-                <span style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.4 }}>
-                  {t('app.vault.ie.export.kdbxDesc')}
-                </span>
+          {/* Export is always an encrypted KDBX archive — plaintext CSV export
+              was removed, so there is no format choice, only an info block. */}
+          <div className="pick-opt sel" style={{ cursor: 'default', alignItems: 'flex-start' }}>
+            <Lock size={16} style={{ flexShrink: 0, marginTop: 2, color: 'var(--accent)' }} />
+            <span style={{ minWidth: 0 }}>
+              <strong style={{ display: 'block', fontSize: 13 }}>
+                {t('app.vault.ie.export.kdbxTitle')}
+              </strong>
+              <span style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.4 }}>
+                {t('app.vault.ie.export.kdbxDesc')}
               </span>
-            </button>
-            <button
-              type="button"
-              className={`pick-opt${exportFormat === 'csv' ? ' sel' : ''}`}
-              onClick={() => setExportFormat('csv')}
-            >
-              <span className="radio" />
-              <span style={{ minWidth: 0 }}>
-                <strong style={{ display: 'block', fontSize: 13 }}>
-                  {t('app.vault.ie.export.csvTitle')}
-                </strong>
-                <span style={{ fontSize: 12, color: 'var(--text-3)', lineHeight: 1.4 }}>
-                  {t('app.vault.ie.export.csvDesc')}
-                </span>
-              </span>
-            </button>
+            </span>
           </div>
 
-          {exportFormat === 'kdbx' ? (
-            <div style={{ marginTop: 14 }}>
-              <div className="pf-label" style={{ marginBottom: 6 }}>
-                <Lock size={14} /> {t('app.vault.ie.export.passLabel')}
-              </div>
-              <input
-                className="sinput sans"
-                style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }}
-                type="password"
-                value={exportPass}
-                onChange={(e) => setExportPass(e.target.value)}
-                placeholder={t('app.vault.ie.export.passPlaceholder')}
-              />
-              <input
-                className="sinput sans"
-                style={{ width: '100%', boxSizing: 'border-box' }}
-                type="password"
-                value={exportPass2}
-                onChange={(e) => setExportPass2(e.target.value)}
-                placeholder={t('app.vault.ie.export.passConfirmPlaceholder')}
-              />
-              <p className="jpb-muted" style={{ marginTop: 8, fontSize: 12 }}>
-                {t('app.vault.ie.export.kdbxHint')}
-              </p>
+          {/* Scope: the whole visible vault, or the selected folder + its subtree. */}
+          <div style={{ marginTop: 14 }}>
+            <div className="pf-label" style={{ marginBottom: 6 }}>
+              <FolderTree size={14} /> {t('app.vault.ie.export.scopeLabel')}
             </div>
-          ) : (
-            <div className="warnbox" style={{ marginTop: 14, alignItems: 'flex-start' }}>
-              <AlertTriangle />
-              <label style={{ display: 'flex', gap: 8, cursor: 'pointer', alignItems: 'flex-start' }}>
-                <input
-                  type="checkbox"
-                  checked={csvAck}
-                  onChange={(e) => setCsvAck(e.target.checked)}
-                  style={{ marginTop: 3 }}
-                />
-                <span>{t('app.vault.ie.export.csvWarning')}</span>
-              </label>
+            <div className="seg" style={{ width: 'fit-content' }}>
+              <button
+                type="button"
+                className={exportScope === 'all' ? 'on' : ''}
+                onClick={() => setExportScope('all')}
+              >
+                {t('app.vault.ie.export.scopeAll')}
+              </button>
+              <button
+                type="button"
+                className={exportScope === 'folder' ? 'on' : ''}
+                disabled={!currentFolderId}
+                onClick={() => setExportScope('folder')}
+                title={currentFolderName || undefined}
+              >
+                {/* Name the folder when we know it: the lead line above counts
+                    the WHOLE visible vault, so an unnamed "current folder"
+                    leaves the actual scope ambiguous. */}
+                {currentFolderName
+                  ? t('app.vault.ie.export.scopeFolderNamed', { name: currentFolderName })
+                  : t('app.vault.ie.export.scopeFolder')}
+              </button>
             </div>
-          )}
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <div className="pf-label" style={{ marginBottom: 6 }}>
+              <Lock size={14} /> {t('app.vault.ie.export.passLabel')}
+            </div>
+            <input
+              className="sinput sans"
+              style={{ width: '100%', boxSizing: 'border-box', marginBottom: 8 }}
+              type="password"
+              value={exportPass}
+              onChange={(e) => setExportPass(e.target.value)}
+              placeholder={t('app.vault.ie.export.passPlaceholder')}
+            />
+            <input
+              className="sinput sans"
+              style={{ width: '100%', boxSizing: 'border-box' }}
+              type="password"
+              value={exportPass2}
+              onChange={(e) => setExportPass2(e.target.value)}
+              placeholder={t('app.vault.ie.export.passConfirmPlaceholder')}
+            />
+            <p className="jpb-muted" style={{ marginTop: 8, fontSize: 12 }}>
+              {t('app.vault.ie.export.kdbxHint')}
+            </p>
+          </div>
 
           <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
             <button type="button" className="btn" onClick={close} disabled={busy}>

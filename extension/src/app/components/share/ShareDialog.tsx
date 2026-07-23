@@ -1,9 +1,11 @@
 /**
  * Share dialog — ported from the SPA components/ShareDialog.tsx (1115 lines).
  *
- * The props contract below is FIXED by the foundation package (same shape as
- * the SPA's ShareDialogProps): WP-VAULT imports and drives this component with
- * these props. Do not edit the interface.
+ * The props contract below is ADDITIVE-ONLY (it started as the SPA's fixed
+ * ShareDialogProps): a new prop must be OPTIONAL and must default to exactly
+ * today's resource behaviour, so every existing call site keeps byte-identical
+ * semantics. Changing/removing an existing prop, making anything required, or
+ * altering the `onClose` signature WOULD break the contract.
  *
  * What changed vs the SPA original: the entire apply-side crypto orchestration
  * (fetch own secret → decrypt → expand Group AROs → verify each recipient's
@@ -38,10 +40,12 @@ import { Avatar } from '../Avatar';
 import { useToast } from '../../lib/toast';
 import { describeApiError } from '../../lib/errors';
 import { t as baseT } from '../../../shared/i18n';
+import { joinName } from '../../../shared/names';
 import { rpc } from '../../../shared/messages';
 import type { PermissionChange } from '../../../shared/rpc/share';
 
 import { searchAros, simulateShare } from '../../services/share';
+import { getFolder } from '../../services/folders';
 import { getResourcePermissions } from '../../services/permissions';
 import { getUser } from '../../services/users';
 import { getGroup } from '../../services/groups';
@@ -76,10 +80,21 @@ type TFunc = typeof t;
 export interface ShareDialogProps {
   /** Whether the dialog is open. */
   open: boolean;
+  /**
+   * What is being shared. Defaults to 'resource' — the historical behaviour;
+   * 'folder' switches the ACL source, drops the simulate step (the backend has
+   * no folder dry-run route) and hides every secret/re-encryption affordance
+   * (folders carry no secret material).
+   */
+  foreignModel?: 'resource' | 'folder';
   /** The resource to share. Provide this OR `resourceId`. */
   resource?: Resource | null;
   /** The id of the resource to share. Provide this OR `resource`. */
   resourceId?: string;
+  /** The id of the folder to share (foreignModel === 'folder' only). */
+  folderId?: string;
+  /** The folder's display name, for the title (may be absent on v5 folders). */
+  folderName?: string;
   /**
    * Existing permissions, if the caller already loaded them. OPTIONAL — when
    * provided the dialog seeds synchronously from these and skips its own
@@ -146,8 +161,7 @@ function errMessage(err: unknown, fallback: string): string {
 
 function aroDisplay(aro: Aro, tr: TFunc): { label: string; sublabel?: string } {
   if (isUserAro(aro)) {
-    const p = aro.profile;
-    const full = p ? `${p.first_name ?? ''} ${p.last_name ?? ''}`.trim() : '';
+    const full = joinName(aro.profile?.first_name, aro.profile?.last_name);
     return { label: full || aro.username, sublabel: aro.username };
   }
   const group = aro as Group;
@@ -208,16 +222,22 @@ function SpinRing() {
 // ---------------------------------------------------------------------------
 export function ShareDialog({
   open,
+  foreignModel = 'resource',
   resource,
   resourceId: resourceIdProp,
+  folderId,
+  folderName,
   existingPermissions,
   onClose,
   onShared,
 }: ShareDialogProps) {
   const toast = useToast();
 
-  const resourceId = resource?.id ?? resourceIdProp ?? '';
-  const resourceName = resource?.name;
+  // One id / one name for both models; the resource branch is byte-identical
+  // to what this component computed before folder mode existed.
+  const isFolder = foreignModel === 'folder';
+  const foreignId = isFolder ? folderId ?? '' : resource?.id ?? resourceIdProp ?? '';
+  const displayName = isFolder ? folderName : resource?.name;
 
   // --- search state ---
   const [query, setQuery] = useState('');
@@ -252,6 +272,11 @@ export function ShareDialog({
   // contains, so we DISPLAY who already has access with human-readable names
   // and avatars straight from the embedded objects. Fallback: a caller MAY
   // pass `existingPermissions` to seed synchronously and skip the fetch.
+  //
+  // Folder mode has exactly ONE source: GET /folders/{id}.json?contain
+  // [permissions]=1 (there is no /permissions/folder/{id}.json route). Those
+  // rows embed NO user/group object, so every row is resolved by the
+  // name-resolution effect below.
   // -----------------------------------------------------------------------
   useEffect(() => {
     if (!open) return;
@@ -273,7 +298,7 @@ export function ShareDialog({
     }
 
     // No id to fetch against: nothing to load (only additions are possible).
-    if (!resourceId) {
+    if (!foreignId) {
       setLoadingPermissions(false);
       setRows([]);
       return;
@@ -285,11 +310,13 @@ export function ShareDialog({
     setRows([]);
     (async () => {
       try {
-        const perms = await getResourcePermissions(resourceId, {
-          containUser: true,
-          containUserProfile: true,
-          containGroup: true,
-        });
+        const perms = isFolder
+          ? (await getFolder(foreignId, { permissions: true })).permissions ?? []
+          : await getResourcePermissions(foreignId, {
+              containUser: true,
+              containUserProfile: true,
+              containGroup: true,
+            });
         if (cancelled) return;
         setRows(perms.map((p) => seedRowFromPermission(p, t)));
         setPermissionsError(null);
@@ -308,13 +335,17 @@ export function ShareDialog({
     };
     // Re-seed whenever the dialog opens for a (possibly) different resource or
     // a caller swaps in a different pre-loaded permission set.
-  }, [open, resourceId, existingPermissions]);
+  }, [open, foreignId, isFolder, existingPermissions]);
 
   // -----------------------------------------------------------------------
   // Resolve human-readable names for any seeded existing-permission rows whose
   // label is still the raw aro_foreign_key UUID (i.e. the permissions endpoint
   // could not embed the ARO, or a caller passed bare Permission[]). Rows whose
   // names came from embedded objects are already resolved and skipped.
+  //
+  // In folder mode this is not a fallback but THE path: /folders/{id}.json
+  // permission rows embed no ARO at all, so every row lands here — which is why
+  // the avatar/first/last fields are backfilled too, not just the label.
   // -----------------------------------------------------------------------
   useEffect(() => {
     if (!open) return;
@@ -323,13 +354,25 @@ export function ShareDialog({
     if (unresolved.length === 0) return;
     let cancelled = false;
     (async () => {
-      const resolved = new Map<string, { label: string; sublabel?: string }>();
+      type Resolved = {
+        label: string;
+        sublabel?: string;
+        avatarSrc?: string | null;
+        firstName?: string | null;
+        lastName?: string | null;
+      };
+      const resolved = new Map<string, Resolved>();
       await Promise.all(
         unresolved.map(async (r) => {
           try {
             if (r.aro === 'User') {
               const u = await getUser(r.aroForeignKey);
-              resolved.set(r.aroForeignKey, aroDisplay(u, t));
+              resolved.set(r.aroForeignKey, {
+                ...aroDisplay(u, t),
+                avatarSrc: u.profile?.avatar?.url?.small ?? null,
+                firstName: u.profile?.first_name ?? null,
+                lastName: u.profile?.last_name ?? null,
+              });
             } else {
               const g = await getGroup(r.aroForeignKey);
               resolved.set(r.aroForeignKey, aroDisplay(g, t));
@@ -344,7 +387,14 @@ export function ShareDialog({
         prev.map((r) => {
           const r2 = resolved.get(r.aroForeignKey);
           return r2 && r.label === r.aroForeignKey
-            ? { ...r, label: r2.label, sublabel: r2.sublabel ?? r.sublabel }
+            ? {
+                ...r,
+                label: r2.label,
+                sublabel: r2.sublabel ?? r.sublabel,
+                avatarSrc: r2.avatarSrc ?? r.avatarSrc,
+                firstName: r2.firstName ?? r.firstName,
+                lastName: r2.lastName ?? r.lastName,
+              }
             : r;
         }),
       );
@@ -523,15 +573,18 @@ export function ShareDialog({
   }, [rows]);
 
   // -----------------------------------------------------------------------
-  // Simulate (read-only preview; plain API_CALL).
+  // Simulate (read-only preview; plain API_CALL). Resource-only: the backend
+  // 404s POST /share/simulate/folder/{id}.json by design (no PHP dry-run route
+  // for folders), so folder mode does not render the button either.
   // -----------------------------------------------------------------------
   const handleSimulate = useCallback(async () => {
-    if (!resourceId) return;
+    if (isFolder) return;
+    if (!foreignId) return;
     setSimulating(true);
     setApplyError(null);
     try {
       const perms = buildPermissions();
-      const result = await simulateShare(resourceId, perms);
+      const result = await simulateShare(foreignId, perms);
       setSimulation(result);
     } catch (err: unknown) {
       setApplyError(describeApiError(err));
@@ -539,7 +592,7 @@ export function ShareDialog({
     } finally {
       setSimulating(false);
     }
-  }, [resourceId, buildPermissions]);
+  }, [isFolder, foreignId, buildPermissions]);
 
   // -----------------------------------------------------------------------
   // Resolve display names for the user ids referenced by a simulation result,
@@ -589,7 +642,7 @@ export function ShareDialog({
   // share — no key material ever enters this iframe.
   // -----------------------------------------------------------------------
   const handleApply = useCallback(async () => {
-    if (!resourceId) return;
+    if (!foreignId) return;
     if (!hasChanges) {
       setApplyError(t('share.errors.noChanges'));
       return;
@@ -602,14 +655,14 @@ export function ShareDialog({
       const permissions = buildPermissions();
       await rpc({
         type: 'SHARE_APPLY',
-        foreignModel: 'resource',
-        foreignId: resourceId,
+        foreignModel: isFolder ? 'folder' : 'resource',
+        foreignId,
         permissions,
       });
 
       toast.success(
-        resourceName
-          ? t('share.toast.sharedNamed', { name: resourceName })
+        displayName
+          ? t('share.toast.sharedNamed', { name: displayName })
           : t('share.toast.sharedUpdated'),
       );
       onShared?.();
@@ -620,7 +673,7 @@ export function ShareDialog({
     } finally {
       setApplying(false);
     }
-  }, [resourceId, resourceName, hasChanges, buildPermissions, toast, onShared, onClose]);
+  }, [isFolder, foreignId, displayName, hasChanges, buildPermissions, toast, onShared, onClose]);
 
   if (!open) return null;
 
@@ -629,7 +682,15 @@ export function ShareDialog({
   return (
     <Modal
       open={open}
-      title={resourceName ? t('share.titleNamed', { name: resourceName }) : t('share.title')}
+      title={
+        isFolder
+          ? displayName
+            ? t('share.titleFolderNamed', { name: displayName })
+            : t('share.titleFolder')
+          : displayName
+            ? t('share.titleNamed', { name: displayName })
+            : t('share.title')
+      }
       icon={<Share2 />}
       onClose={() => !busy && onClose(false)}
       maxWidth={620}
@@ -642,30 +703,39 @@ export function ShareDialog({
           <button className="btn" onClick={() => onClose(false)} disabled={busy}>
             {t('common:actions.cancel')}
           </button>
-          <button
-            className="btn"
-            onClick={handleSimulate}
-            disabled={busy || simulating || !hasChanges}
-            title={t('share.simulateTooltip')}
-          >
-            {simulating ? <SpinRing /> : null}
-            {simulating ? t('share.simulating') : t('share.simulate')}
-          </button>
+          {/* Simulate is a resource-only backend route — see handleSimulate. */}
+          {!isFolder && (
+            <button
+              className="btn"
+              onClick={handleSimulate}
+              disabled={busy || simulating || !hasChanges}
+              title={t('share.simulateTooltip')}
+            >
+              {simulating ? <SpinRing /> : null}
+              {simulating ? t('share.simulating') : t('share.simulate')}
+            </button>
+          )}
           <button
             className="btn primary"
             onClick={handleApply}
             disabled={busy || !hasChanges}
           >
+            {/* Folder mode never encrypts anything: no re-encrypt icon, and a
+                plain Save/Saving label instead of the "encrypt and share" one. */}
             {applying ? (
               <SpinRing />
-            ) : newlyAdded.length > 0 ? (
+            ) : !isFolder && newlyAdded.length > 0 ? (
               <RefreshCw size={16} />
             ) : null}
-            {applying
-              ? t('share.encryptingAndSharing')
-              : newlyAdded.length > 0
-                ? t('share.encryptAndShare')
-                : t('common:actions.save')}
+            {isFolder
+              ? applying
+                ? t('common:actions.saving')
+                : t('common:actions.save')
+              : applying
+                ? t('share.encryptingAndSharing')
+                : newlyAdded.length > 0
+                  ? t('share.encryptAndShare')
+                  : t('common:actions.save')}
           </button>
         </>
       }
@@ -768,6 +838,15 @@ export function ShareDialog({
           </div>
         )}
       </div>
+
+      {/* Sharing a folder does NOT cascade to the credentials inside it
+          (PermissionService.shareFolder only touches the Folder ACO and
+          folders_relations) — say so, or the grant reads as more than it is. */}
+      {isFolder && (
+        <Banner variant="warning" icon={<AlertTriangle size={16} />}>
+          {t('share.folderNote')}
+        </Banner>
+      )}
 
       {/* ---- Current / draft permissions ---- */}
       <div style={{ marginBottom: 8 }}>
@@ -900,8 +979,9 @@ export function ShareDialog({
         )}
       </div>
 
-      {/* ---- Re-encrypt summary (only when there are newly-added recipients) ---- */}
-      {newlyAdded.length > 0 && (
+      {/* ---- Re-encrypt summary (only when there are newly-added recipients) ----
+          Never in folder mode: there is no secret to re-encrypt. */}
+      {!isFolder && newlyAdded.length > 0 && (
         <div className="reencrypt">
           <div className="re-head">
             <RefreshCw /> {t('share.reencrypt.head')}

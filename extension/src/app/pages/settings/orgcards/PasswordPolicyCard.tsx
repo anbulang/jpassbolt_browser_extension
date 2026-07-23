@@ -1,7 +1,7 @@
 /**
  * Password/passphrase generator policy card — ported from the SPA Settings.tsx
  * PasswordPolicyCard. Read-only in CE: any user may READ the policy, but this
- * card is only mounted inside the admin-gated OrgPoliciesSection.
+ * card is only mounted inside the settings page's admin-gated section group.
  */
 import { useEffect, useState } from 'react';
 import { KeySquare } from 'lucide-react';
@@ -10,7 +10,7 @@ import type { PasswordPolicies } from '../../../../shared/types';
 import { describeApiError } from '../../../lib/errors';
 import { tf } from '../../../lib/i18n';
 import { Badge } from '../../../components/Badge';
-import { CardSpinner, ErrorBanner } from '../OrgPoliciesSection';
+import { CardSpinner, CardErrorBanner as ErrorBanner } from '../cardKit';
 
 export function PasswordPolicyCard() {
   const [policy, setPolicy] = useState<PasswordPolicies | null>(null);

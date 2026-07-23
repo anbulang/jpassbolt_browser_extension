@@ -22,8 +22,8 @@ export interface AccountInfo {
   userId: string;
   /**
    * True ONLY when written from a successful, server-authoritative sign-in
-   * (finalizeSession). The cosmetic pre-unlock greet writers — IMPORT_KEY,
-   * SETUP_COMMIT, the cold-start backfill — leave it falsy: their serverUrl and
+   * (finalizeSession). The cosmetic pre-unlock greet writers — SETUP_COMMIT and
+   * the cold-start backfill — leave it falsy: their serverUrl and
    * identity are unverified guesses safe to DISPLAY but never to drive a network
    * action (e.g. the lost-passphrase recover POST to account.serverUrl).
    */
@@ -117,10 +117,22 @@ export interface SessionChangedMsg extends SessionSnapshot {
 export type CoreReq =
   | { type: 'GET_STATUS' }
   | { type: 'SET_SERVER'; serverUrl: string }
-  | { type: 'IMPORT_KEY'; armoredPrivateKey: string }
   | { type: 'UNLOCK'; passphrase: string }
   | { type: 'LOCK' }
+  // LOGOUT ends the SESSION only (official semantics): it locks and drops the
+  // JWT + cached user, but KEEPS the account private/public key + identity, so
+  // the state machine lands on 'locked' (unlock re-enters). REMOVE_ACCOUNT is
+  // the destructive "forget this account on this device" action (below).
   | { type: 'LOGOUT' }
+  // Remove the account from this device entirely: locks, then deletes the
+  // private/public key + JWT + user + account identity + any staged/replaced key
+  // slots. Irreversible without the user's own key backup (the server never
+  // holds the private key), so callers MUST confirm first.
+  | { type: 'REMOVE_ACCOUNT' }
+  // Export the account's key material for an offline recovery-kit download. The
+  // armored private key is passphrase-protected at rest (same trust level as the
+  // official account kit); it goes only to the user's local disk, never the wire.
+  | { type: 'EXPORT_ACCOUNT_KEY' }
   // Open the quickaccess popup (from the in-page menu). The background opens the
   // real action popup when it can, else a detached quickaccess window — never a
   // full-page tab.
@@ -149,10 +161,11 @@ export type CoreReq =
 export interface CoreRespMap {
   GET_STATUS: StatusResult;
   SET_SERVER: StatusResult;
-  IMPORT_KEY: StatusResult;
   UNLOCK: StatusResult;
   LOCK: StatusResult;
   LOGOUT: StatusResult;
+  REMOVE_ACCOUNT: StatusResult;
+  EXPORT_ACCOUNT_KEY: { privateKeyArmored: string; publicKeyArmored: string; username: string };
   OPEN_QUICKACCESS: { ok: true };
   LIST: { items: VaultItem[] };
   REVEAL: { item: VaultItem; secret: SecretFields };

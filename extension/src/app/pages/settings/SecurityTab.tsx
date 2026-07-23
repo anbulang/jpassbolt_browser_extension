@@ -27,7 +27,7 @@ import {
 } from '../../services/mfa';
 import type { MfaSetupState } from '../../../shared/types';
 import { buildQrMatrix } from './qr';
-import { ErrorBanner } from './index';
+import { ErrorBanner, SectionHeader } from './cardKit';
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -319,8 +319,10 @@ export function SecurityTab() {
 
   return (
     <span style={{ display: 'contents' }}>
-      <h2 className="stitle">{t('app.settings.security.title')}</h2>
-      <div className="ssub">{t('app.settings.security.subtitle')}</div>
+      <SectionHeader
+        title={t('app.settings.security.title')}
+        subtitle={t('app.settings.security.subtitle')}
+      />
 
       {rateLimited && (
         <div style={{ marginBottom: 16 }}>

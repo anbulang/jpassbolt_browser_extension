@@ -58,7 +58,9 @@ export async function parseKdbx(buf: ArrayBuffer, kdbxPassword: string): Promise
     return String(v);
   };
 
-  const walk = (group: kdbxweb.KdbxGroup): void => {
+  // `path` accumulates the ancestor group names (the root group itself is not
+  // counted, matching how a KeePass tree presents the default group as "root").
+  const walk = (group: kdbxweb.KdbxGroup, path: string[]): void => {
     for (const e of group.entries) {
       const f = e.fields;
       const entry: ImportEntry = {
@@ -68,6 +70,7 @@ export async function parseKdbx(buf: ArrayBuffer, kdbxPassword: string): Promise
         password: fieldText(f.get('Password')),
         description: fieldText(f.get('Notes')),
         totp: fieldText(f.get('otp')) || undefined,
+        folderPath: path.length ? [...path] : undefined,
       };
       if (entry.password || entry.name || entry.username) {
         if (!entry.name) entry.name = entry.uri || entry.username || 'Untitled';
@@ -77,10 +80,14 @@ export async function parseKdbx(buf: ArrayBuffer, kdbxPassword: string): Promise
     for (const sub of group.groups) {
       // Skip the KeePass Recycle Bin so deleted entries are not re-imported.
       if (db.meta.recycleBinUuid && sub.uuid.equals(db.meta.recycleBinUuid)) continue;
-      walk(sub);
+      // Flatten (don't index) an unnamed or whitespace-only group so it never
+      // becomes an empty/blank path segment that the backend would reject,
+      // collapsing the whole branch to the import root.
+      const subName = fieldText(sub.name).trim();
+      walk(sub, subName ? [...path, subName] : path);
     }
   };
-  walk(db.getDefaultGroup());
+  walk(db.getDefaultGroup(), []);
   return entries;
 }
 
@@ -93,8 +100,30 @@ export async function buildKdbx(
   wireArgon2();
   const credentials = new kdbxweb.Credentials(kdbxweb.ProtectedValue.fromString(kdbxPassword));
   const db = kdbxweb.Kdbx.create(credentials, dbName);
-  const group = db.getDefaultGroup();
+  const root = db.getDefaultGroup();
+
+  // Rebuild the folder hierarchy as nested KeePass groups. ensureGroup walks a
+  // path segment-by-segment, creating (and caching by the joined path key) each
+  // level exactly once so siblings share their common ancestors.
+  const groupCache = new Map<string, kdbxweb.KdbxGroup>();
+  const ensureGroup = (path: string[]): kdbxweb.KdbxGroup => {
+    let parent = root;
+    const acc: string[] = [];
+    for (const segment of path) {
+      acc.push(segment);
+      const key = JSON.stringify(acc);
+      let group = groupCache.get(key);
+      if (!group) {
+        group = db.createGroup(parent, segment);
+        groupCache.set(key, group);
+      }
+      parent = group;
+    }
+    return parent;
+  };
+
   for (const e of entries) {
+    const group = e.folderPath && e.folderPath.length ? ensureGroup(e.folderPath) : root;
     const entry = db.createEntry(group);
     entry.fields.set('Title', e.name);
     entry.fields.set('UserName', e.username);

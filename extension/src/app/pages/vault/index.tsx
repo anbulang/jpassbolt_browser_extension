@@ -82,6 +82,12 @@ export default function VaultPage() {
   const [editing, setEditing] = useState<Resource | null>(null);
   const [creating, setCreating] = useState(false);
   const [importExport, setImportExport] = useState(false);
+  /**
+   * Set when the import/export modal was opened from a folder's "导出" menu
+   * entry: it overrides the export scope for that one run (name kept optional —
+   * a v5 folder's name may be absent). Cleared on close.
+   */
+  const [exportFolder, setExportFolder] = useState<{ id: string; name?: string } | null>(null);
   const [sharing, setSharing] = useState<Resource | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Resource | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -110,10 +116,18 @@ export default function VaultPage() {
 
   const filtered = useMemo(() => {
     const q = debouncedSearch.trim().toLowerCase();
-    const folderSet = selectedFolderId ? folderMembership.get(selectedFolderId) : null;
     return display.filter((r) => {
       if (favoritesOnly && !r.favorite) return false;
-      if (folderSet && !folderSet.has(r.id)) return false;
+      // Whether to filter by folder is decided by selectedFolderId ALONE — not by
+      // the membership Set being present. A just-created folder isn't in
+      // folderMembership yet (its map entry only lands after the next refetch), so
+      // keying the filter off `folderSet && …` made a missing entry mean "don't
+      // filter" and the folder showed EVERY credential. A selected folder with no
+      // known membership is an EMPTY folder, not an unfiltered one.
+      if (selectedFolderId) {
+        const folderSet = folderMembership.get(selectedFolderId);
+        if (!folderSet || !folderSet.has(r.id)) return false;
+      }
       if (!q) return true;
       // username/uri are nullable on v4 resources (optional columns; the app-side
       // listResources does not normalize them) — coerce before lowercasing.
@@ -208,6 +222,13 @@ export default function VaultPage() {
           if (on) setSelectedFolderId(null);
         }}
         onResourceMoved={() => void refetch()}
+        onFoldersChanged={() => void refetch()}
+        // Export has to be driven from here: the scope's base id set is
+        // `display`, which only exists on this page.
+        onExportFolder={(f) => {
+          setExportFolder({ id: f.id, name: f.name });
+          setImportExport(true);
+        }}
       />
 
       {/* Center: resource list */}
@@ -394,11 +415,28 @@ export default function VaultPage() {
         }}
       />
 
-      {/* Import / Export (CSV + KDBX) — parsing/crypto live in the background. */}
+      {/* Import (CSV + KDBX) / Export (encrypted KDBX) — parsing/crypto live in
+          the background. The scope folder is the one the tree's "导出" entry
+          asked for, else the selected folder. resourceIds stays the FULL
+          visible set: the background intersects it with the folder subtree it
+          expands itself, so pre-filtering here would only narrow it wrongly. */}
       <ImportExportModal
         open={importExport}
         resourceIds={display.map((r) => r.id)}
-        onClose={() => setImportExport(false)}
+        currentFolderId={exportFolder?.id ?? selectedFolderId}
+        currentFolderName={
+          exportFolder
+            ? exportFolder.name
+            : selectedFolderId
+              ? folders.find((f) => f.id === selectedFolderId)?.name
+              : undefined
+        }
+        initialTab={exportFolder ? 'export' : undefined}
+        initialExportScope={exportFolder ? 'folder' : undefined}
+        onClose={() => {
+          setImportExport(false);
+          setExportFolder(null);
+        }}
         onImported={() => void refetch()}
       />
 
