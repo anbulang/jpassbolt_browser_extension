@@ -33,8 +33,10 @@ export async function listResources(
   opts: ListResourcesOptions = {}
 ): Promise<Resource[]> {
   const params: Record<string, string> = {};
-  if (opts.favorite !== undefined) {
-    params['filter[is-favorite]'] = String(opts.favorite);
+  // 只在 favorite===true 时发过滤器。后端(对齐 PHP)对 filter[is-favorite]=0/false
+  // 是"只留非收藏"(notMatching)语义,而非"全部";发 false 会得到与直觉相反的结果。
+  if (opts.favorite === true) {
+    params['filter[is-favorite]'] = '1';
   }
   if (opts.containFavorite) {
     params['contain[favorite]'] = '1';

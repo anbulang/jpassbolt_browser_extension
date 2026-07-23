@@ -118,6 +118,13 @@ interface BookmarkRecord {
   rootName?: string;
   importRootId?: string;
   folders?: Record<string, string>;
+  /**
+   * Durable "root create was attempted and failed → import ran flat" decision.
+   * Without it, a worker-death resume after a transient root-POST failure would
+   * re-attempt the root and, on success, split one import across two layouts
+   * (early rows flat at vault root, later rows under a fresh tree).
+   */
+  foldersDisabled?: boolean;
   expires: number;
 }
 type BookmarkStore = Record<string, BookmarkRecord>;
@@ -148,6 +155,7 @@ async function saveBookmark(
     rootName?: string;
     importRootId?: string;
     folders?: Record<string, string>;
+    foldersDisabled?: boolean;
   },
 ): Promise<void> {
   try {
@@ -355,6 +363,9 @@ async function importStage(req: Req<'IMPORT_STAGE'>): Promise<ImportExportRespMa
     // bookmark), so re-committing does not create a duplicate hierarchy.
     importRootId: bookmark?.importRootId,
     folderCache: new Map(Object.entries(bookmark?.folders ?? {})),
+    // Honor a prior "folders disabled" decision so a resume stays consistently
+    // flat instead of re-attempting the root and splitting the import.
+    foldersDisabled: bookmark?.foldersDisabled,
   });
   armLock();
   return { importId, entries: meta, rootFolderName: rootName };
@@ -386,6 +397,7 @@ async function importCommit(
       rootName: staged.rootName,
       importRootId: staged.importRootId,
       folders: Object.fromEntries(staged.folderCache),
+      foldersDisabled: staged.foldersDisabled,
     });
 
   // -------------------------------------------------------------------------
