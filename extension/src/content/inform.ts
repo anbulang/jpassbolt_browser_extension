@@ -2,7 +2,8 @@
  * In-page UI for the autofill content script, rendered inside a CLOSED Shadow
  * DOM so the host page can neither style it nor read it. Three surfaces:
  *
- *   - CTA: a small JP badge pinned inside a login field, with a suggestion count.
+ *   - CTA: a small JPassbolt brand badge pinned inside a login field, with a
+ *     suggestion count.
  *   - Menu: a dropdown of suggested credentials + generate-password + open-vault.
  *   - Banner: the post-login "Save this password?" prompt (autosave).
  *
@@ -14,6 +15,7 @@ import { rpc, type VaultItem } from '../shared/messages';
 import { t } from '../shared/i18n';
 import { fill, setValue, passwordFields } from './dom';
 import { generatePassword, DEFAULT_PASSWORD_OPTIONS } from '../shared/passgen';
+import brandIconUrl from '../icons/icon-128.png';
 
 const STYLE = `
 :host { all: initial; }
@@ -21,9 +23,10 @@ const STYLE = `
 .cta {
   position: fixed; z-index: 2147483646; width: 22px; height: 22px; border-radius: 6px;
   border: none; cursor: pointer; display: grid; place-items: center;
-  background: #4263eb; color: #fff; font-size: 10px; font-weight: 700;
+  background: transparent;
   box-shadow: 0 1px 3px rgba(0,0,0,.25); padding: 0; line-height: 1;
 }
+.cta > .brand-icon { width: 22px; height: 22px; display: block; }
 .cta .badge {
   position: absolute; top: -6px; right: -6px; min-width: 15px; height: 15px; padding: 0 3px;
   border-radius: 999px; background: #e8590c; color: #fff; font-size: 9px; font-weight: 700;
@@ -50,7 +53,7 @@ const STYLE = `
   background: #fff; color: #1f2937; border: 1px solid #e5e7eb; border-radius: 12px;
   box-shadow: 0 12px 32px rgba(0,0,0,.2); padding: 14px; }
 .banner .t { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; margin-bottom: 4px; }
-.banner .logo { width: 22px; height: 22px; border-radius: 6px; background: #4263eb; color: #fff; display: grid; place-items: center; font-size: 10px; font-weight: 700; }
+.banner .logo { width: 22px; height: 22px; border-radius: 6px; display: block; }
 .banner .d { font-size: 12.5px; color: #6b7280; line-height: 1.45; margin-bottom: 12px; word-break: break-all; }
 .banner .err { font-size: 12px; color: #c92a2a; line-height: 1.4; margin: -4px 0 10px; }
 .banner .btns { display: flex; gap: 8px; }
@@ -66,6 +69,14 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
+}
+
+function brandImage(cls: string): HTMLImageElement {
+  const image = el('img', cls);
+  image.src = brandIconUrl;
+  image.alt = '';
+  image.draggable = false;
+  return image;
 }
 
 function hostOf(u: string): string {
@@ -106,7 +117,8 @@ export class InForm {
   showCta(anchor: HTMLInputElement, count: number): void {
     this.anchor = anchor;
     if (!this.cta) {
-      this.cta = el('button', 'cta', 'JP');
+      this.cta = el('button', 'cta');
+      this.cta.appendChild(brandImage('brand-icon'));
       this.cta.title = 'JPassbolt';
       this.cta.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); void this.openMenu(); });
       this.root.appendChild(this.cta);
@@ -298,7 +310,7 @@ export class InForm {
     this.hideBanner();
     const b = el('div', 'banner');
     const head = el('div', 't');
-    head.append(el('span', 'logo', 'JP'), el('span', undefined, t('inform.saveThisPassword')));
+    head.append(brandImage('logo'), el('span', undefined, t('inform.saveThisPassword')));
     b.appendChild(head);
     const who = p.username ? `${p.username} · ${hostOf(p.uri)}` : hostOf(p.uri);
     b.appendChild(el('div', 'd', who));
