@@ -220,6 +220,13 @@ export const en: Dict = {
   'bg.sessionExpired': 'Session expired. Please unlock again.',
   'bg.noAccountMatchesKey': 'No account on the server matches this key.',
   'bg.noChallengeToken': 'Server did not return a GPGAuth challenge token.',
+  // Local renderings of known X-GPGAuth-Debug messages — the server's own text
+  // is never shown (see gpgAuthError in background/http.ts).
+  'bg.gpgAuthMissingKeyId': 'Login failed: no key fingerprint was sent to the server.',
+  'bg.gpgAuthServerKeyProblem':
+    "The server rejected the login because of a problem with its own GPG key. This is a server-side misconfiguration — contact the administrator.",
+  'bg.gpgAuthRejected':
+    'The server rejected the login request. Check that this key belongs to an account on this server.',
   'bg.badChallengeFormat':
     'The server sent a malformed login challenge. Nothing was sent back — this server may be compromised.',
   'bg.serverKeyMismatch':
@@ -475,6 +482,11 @@ export const zh: Dict = {
   'bg.sessionExpired': '会话已过期，请重新解锁。',
   'bg.noAccountMatchesKey': '服务器上没有账户与此密钥匹配。',
   'bg.noChallengeToken': '服务器未返回 GPGAuth 质询令牌。',
+  // 已知 X-GPGAuth-Debug 消息的本地化呈现——服务端原文永不展示
+  // （见 background/http.ts 的 gpgAuthError）。
+  'bg.gpgAuthMissingKeyId': '登录失败：未向服务器发送密钥指纹。',
+  'bg.gpgAuthServerKeyProblem': '服务器因自身 GPG 密钥问题拒绝了登录。这是服务端配置错误，请联系管理员。',
+  'bg.gpgAuthRejected': '服务器拒绝了登录请求。请确认此密钥对应该服务器上的某个账户。',
   'bg.badChallengeFormat': '服务器下发的登录质询格式非法，已中止且未回传任何内容——该服务器可能已被入侵。',
   'bg.serverKeyMismatch':
     '服务器密钥已变更且无法验证。为保护你，登录已中止——该服务器可能被篡改。请重新打开邮件里的邀请/恢复链接以重新建立信任。',

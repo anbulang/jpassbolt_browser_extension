@@ -75,6 +75,16 @@ export interface FolderTreeProps {
    */
   onFoldersChanged?: () => void;
   /**
+   * Bump to force a reload of the tree — the mirror image of
+   * onFoldersChanged above.
+   *
+   * The tree owns its own folder list, so changes made OUTSIDE it (an import
+   * creating a whole subtree, most visibly) are invisible here until the
+   * component remounts, i.e. until the user reloads the page. Incrementing
+   * this from the parent after such an operation refetches the tree in place.
+   */
+  reloadKey?: number;
+  /**
    * Asks the parent to export this folder's subtree. Optional: without it the
    * "导出" menu entry is not rendered at all (the tree cannot export on its own
    * — the export scope needs the parent's resolved resource list).
@@ -155,6 +165,7 @@ export default function FolderTree({
   onToggleFavorites,
   onResourceMoved,
   onFoldersChanged,
+  reloadKey = 0,
   onExportFolder,
 }: FolderTreeProps) {
   const toast = useToast();
@@ -211,9 +222,12 @@ export default function FolderTree({
     }
   }, []);
 
+  // reloadKey is a dependency, not a no-op: load() is a stable useCallback, so
+  // without it this effect runs exactly once (on mount) and the tree can only
+  // ever be refreshed by a full page reload.
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, reloadKey]);
 
   useEffect(() => {
     if (!menuFor) return;

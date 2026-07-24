@@ -151,6 +151,13 @@ try {
     // demands an explicit tick (the safety gate added in the nine-issues wave).
     const gate = setup.locator('input[type=checkbox]').first();
     if (await gate.count()) {
+      // 闸门里不得再出现私钥下载（已迁到 设置 → 密钥,见 ⑦）
+      const gateDl = await setup
+        .getByRole('button', { name: /下载备份|Download$|导出/ })
+        .count();
+      if (gateDl === 0) R.ok('④ 闸门内不再提供私钥下载（已迁至设置页）');
+      else R.bad('④ 回归：闸门内又出现了私钥下载按钮', `匹配数=${gateDl}`);
+
       await gate.check({ force: true });
       await setup.waitForTimeout(400);
       R.ok('④ ExistingAccountGate 拦住了改绑（需显式确认）');
@@ -189,6 +196,125 @@ try {
   if (!raw.length) R.ok('无裸方括号 URL（Tomcat 400 陷阱已堵）', `${calls.length} 次 /api/ 调用`);
   else R.bad('仍有裸方括号 URL', raw.slice(0, 3).join(' , '));
   if (!bad400.length) R.ok('无 /api/ 返回 400'); else R.bad('有 400 响应', bad400.map((u) => u.split('/api/')[1]).slice(0, 4).join(' , '));
+
+  // ── ⑦ 私钥导出只在「设置 → 密钥」，不在 setup/恢复闸门里 ────────────────
+  // 闸门里放私钥下载会被读成「流程要求的一步」,把用户训练成一被提示就把私钥
+  // 存盘;导出改为设置页里用户主动发起的动作(对齐官方 Keys Inspector → Private)。
+  try {
+    const kt = await ctx.newPage();
+    await kt.goto(url('app.html#/settings?section=keys'));
+    await kt.waitForLoadState('networkidle');
+    await kt.waitForTimeout(2500);
+    await kt.screenshot({ path: `${SHOT}/settings-keys.png` });
+    const ktText = await kt.locator('body').innerText();
+    const hasKit = /恢复工具包|Recovery kit/.test(ktText);
+    const hasBtn = await kt
+      .getByRole('button', { name: /下载恢复工具包|Download recovery kit/ })
+      .count();
+    if (hasKit && hasBtn) R.ok('⑦ 设置→密钥 提供恢复工具包导出');
+    else R.bad('⑦ 设置→密钥 缺少恢复工具包导出', `卡片=${hasKit} 按钮=${hasBtn}`);
+    await kt.close();
+  } catch (err) {
+    R.bad('⑦ 密钥页检查异常', String(err).slice(0, 160));
+  }
+
+  // ── ⑥ 导入后侧边栏文件夹树当场刷新（无需整页刷新）───────────────────────
+  // FolderTree 自己持有一份 folders，父级的 refetch() 碰不到它，于是导入建出的
+  // 文件夹曾经只能靠整页刷新才出现在侧边栏。这里走真实导入路径并断言当场可见。
+  try {
+    const tag = `E2E-Imp-${Date.now()}`;
+    const csv =
+      'name,username,uri,password,description,folder\n' +
+      `${tag}-item,u@example.com,https://example.com,pw123456,,${tag}\n`;
+
+    await app.bringToFront();
+    const ieBtn = app.getByRole('button', { name: /导入\/导出|Import\/Export/ }).first();
+    if (!(await ieBtn.count())) {
+      R.bad('⑥ 找不到「导入/导出」按钮');
+    } else {
+      const before = await app.locator('.folders').innerText().catch(() => '');
+      await ieBtn.click();
+      await app.waitForTimeout(500);
+      // ① 的「导出文件夹」检查会留下 exportFolder 状态，弹窗因此以导出页打开
+      // （initialTab={exportFolder ? 'export' : undefined}）——显式切回导入页。
+      const importTab = app.getByRole('button', { name: /^导入$|^Import$/ }).first();
+      if (await importTab.count()) {
+        await importTab.click();
+        await app.waitForTimeout(400);
+      }
+      try {
+        await app.locator('input[type=file]').waitFor({ state: 'attached', timeout: 10000 });
+      } catch {
+        await app.screenshot({ path: `${SHOT}/import-modal-missing.png` });
+        throw new Error('导入弹窗未出现（截图 import-modal-missing.png）');
+      }
+      await app.locator('input[type=file]').setInputFiles({
+        name: 'e2e-import.csv',
+        mimeType: 'text/csv',
+        buffer: Buffer.from(csv, 'utf8'),
+      });
+      await app.waitForTimeout(300);
+      await app.getByRole('button', { name: /开始导入|Start import/ }).first().click();
+      // 等成功提示，而不是死等固定时长（导入是分批 RPC + 逐层建文件夹）
+      await app
+        .getByText(/成功导入|Imported \d/)
+        .first()
+        .waitFor({ timeout: 60000 })
+        .catch(() => {});
+      await app.waitForTimeout(1500);
+      await app.screenshot({ path: `${SHOT}/import-done.png` });
+
+      // 刻意不关弹窗、更不刷新页面：侧边栏 .folders 仍在 DOM 中，
+      // 「无需整页刷新就能看到新文件夹」正是本项要断言的命题。
+
+      const after = await app.locator('.folders').innerText().catch(() => '');
+      // 导入把所有条目收进一个 `import-<本地时间戳>` 根文件夹，CSV 的 folder 列
+      // 是它的子文件夹（默认折叠，不在 innerText 里）——所以断言的是「多了一个
+      // 此前不存在的 import- 根文件夹」。库是 H2 内存库、反复跑会累积旧的
+      // import-*，故比较的是集合差而非「是否含 import-」。
+      const rootsOf = (s) => new Set(s.match(/import-\d{8}-\d{6}/g) ?? []);
+      const beforeRoots = rootsOf(before);
+      const fresh = [...rootsOf(after)].filter((r) => !beforeRoots.has(r));
+      if (fresh.length) {
+        R.ok('⑥ 导入的文件夹已实时出现在侧边栏（未刷新页面）', fresh.join(','));
+      } else if (before === after) {
+        R.bad('⑥ 回归：导入后侧边栏未刷新（要整页刷新才出现）', `侧边栏: ${after.slice(0, 80)}`);
+      } else {
+        R.bad('⑥ 侧边栏变了但没有新的 import- 根文件夹', `实得: ${after.slice(0, 120)}`);
+      }
+    }
+  } catch (err) {
+    // 不让本项的意外把后续检查一起带走（all.mjs 的 try 没有 catch）
+    R.bad('⑥ 导入刷新检查异常', String(err).slice(0, 200));
+  }
+
+  // ── ⑤ 密钥不匹配时的错误文案（必须放最后：本检查会替换掉 ada 的密钥）─────
+  // 服务器对「指纹无对应用户」的回答是 200 + X-GPGAuth-Error（官方 Passbolt
+  // 用 400），而早期实现只判断 404，于是把它误报成「服务器未返回质询令牌」,
+  // 把排查引向一台完全健康的服务器。用现场生成的密钥(指纹必然不在库中)守住它。
+  {
+    const openpgp = await import('openpgp');
+    const { privateKey } = await openpgp.generateKey({
+      userIDs: [{ name: 'Nobody', email: 'nobody@example.invalid' }],
+      passphrase: 'password',
+      format: 'armored',
+    });
+    await rpc({ type: 'SETUP_IMPORT_KEY', armoredPrivateKey: privateKey });
+    await rpc({
+      type: 'SETUP_COMMIT',
+      account: { userId: '', username: 'ada@passbolt.com', fullName: 'Ada Lovelace' },
+      allowReplace: true,
+    });
+    const res = await rpc({ type: 'UNLOCK', passphrase: 'password' });
+    const msg = String((res && (res.error || res.message)) || JSON.stringify(res));
+    if (/未返回 GPGAuth 质询令牌|did not return a GPGAuth challenge/i.test(msg)) {
+      R.bad('⑤ 回归：密钥不匹配被误报成「服务器未返回质询令牌」', msg.slice(0, 120));
+    } else if (/没有账户与此密钥匹配|No account on the server matches/i.test(msg)) {
+      R.ok('⑤ 密钥不匹配 → 正确文案（不再甩锅服务器）');
+    } else {
+      R.bad('⑤ 密钥不匹配的文案既非预期新文案也非旧误报', msg.slice(0, 120));
+    }
+  }
 } finally {
   const fail = R.finish(SHOT);
   await ctx.close();

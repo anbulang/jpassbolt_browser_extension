@@ -42,13 +42,10 @@ export const en: Dict = {
   'app.auth.gate.fingerprintLabel': 'Key fingerprint',
   'app.auth.gate.warning':
     'Continuing REPLACES this account and deletes its private key from this device. Without a backup, that account’s data can never be decrypted again — the server does not store private keys.',
-  'app.auth.gate.kitTitle': 'Back up this device’s private key first',
-  'app.auth.gate.kitDesc':
-    'Exports the private key already stored on THIS device for the account above — nothing is downloaded from the server. Save it before this recovery overwrites it.',
-  'app.auth.gate.kitSaved': 'Backup downloaded — keep it somewhere safe and offline',
-  'app.auth.gate.download': 'Download',
-  'app.auth.gate.downloading': 'Exporting…',
-  'app.auth.gate.exportFailed': 'Could not export the key backup. Please try again.',
+  // Points at the export rather than performing it — see ExistingAccountGate.
+  'app.auth.gate.backupTitle': 'Make sure that account’s key is backed up first',
+  'app.auth.gate.backupDesc':
+    'Its private key exists only on this device; the server keeps no copy. If you have no backup yet, go back, sign in to that account, and export it from Settings → Keys.',
   'app.auth.gate.ack':
     'I understand the risk and have backed up the private key of the account shown above.',
   'app.auth.gate.continue': 'I understand the risk — continue',
@@ -132,7 +129,13 @@ export const en: Dict = {
   'app.auth.recovery.backToLogin': 'Back to sign in',
   'app.auth.recovery.steps.account': 'Account',
   'app.auth.recovery.steps.verify': 'Verify',
-  'app.auth.recovery.steps.reset': 'Reset',
+  // Labelled "Confirm", not "Reset": this step resets NOTHING — it shows the
+  // key fingerprint and account for the user to check, then submits the
+  // recovery (see RecoveryPage `step === 2`, whose own title has always been
+  // "Confirm and restore access"). The `.reset` key name is kept because it is
+  // shared by a whole family of reset.* strings on that step; only the visible
+  // label was wrong.
+  'app.auth.recovery.steps.reset': 'Confirm',
   'app.auth.recovery.steps.done': 'Done',
   'app.auth.recovery.accountFallback': 'your account',
   'app.auth.recovery.request.title': 'Recover your account',
@@ -268,13 +271,10 @@ export const zh: Dict = {
   'app.auth.gate.fingerprintLabel': '密钥指纹',
   'app.auth.gate.warning':
     '继续将替换此账号并删除其本机私钥；若无备份，该账号数据将永久无法解密（服务器不保存私钥）。',
-  'app.auth.gate.kitTitle': '先备份本设备的私钥',
-  'app.auth.gate.kitDesc':
-    '导出的是本设备上已保存的上述账号私钥 —— 不会从服务器下载任何东西。请在本次恢复覆盖它之前先保存。',
-  'app.auth.gate.kitSaved': '备份已下载 — 请离线妥善保存',
-  'app.auth.gate.download': '下载备份',
-  'app.auth.gate.downloading': '正在导出…',
-  'app.auth.gate.exportFailed': '导出密钥备份失败，请重试。',
+  // 只做指引、不在此处导出 —— 见 ExistingAccountGate 的注释
+  'app.auth.gate.backupTitle': '请先确认该账号的私钥已备份',
+  'app.auth.gate.backupDesc':
+    '它的私钥只存在于本设备，服务器不保留任何副本。若尚未备份，请返回并登录该账号，在「设置 → 密钥」中导出。',
   'app.auth.gate.ack': '我已了解风险，并已备份上述账号的私钥。',
   'app.auth.gate.continue': '我已了解风险，继续',
   'app.auth.gate.back': '返回',
@@ -351,7 +351,9 @@ export const zh: Dict = {
   'app.auth.recovery.backToLogin': '返回登录',
   'app.auth.recovery.steps.account': '账户',
   'app.auth.recovery.steps.verify': '验证',
-  'app.auth.recovery.steps.reset': '重设',
+  // 标为「确认」而非「重设」：该步不重设任何东西,只展示指纹/账户供核对后提交
+  // （见 RecoveryPage `step === 2`,其标题一直是「确认并恢复访问权」）。
+  'app.auth.recovery.steps.reset': '确认',
   'app.auth.recovery.steps.done': '完成',
   'app.auth.recovery.accountFallback': '账户',
   'app.auth.recovery.request.title': '找回你的账户',

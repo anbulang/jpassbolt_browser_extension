@@ -18,7 +18,6 @@ import { useNavigate } from 'react-router-dom';
 import {
   AlertTriangle,
   Check,
-  Download,
   Fingerprint,
   Globe,
   KeyRound,
@@ -351,9 +350,14 @@ function GateLoading(): JSX.Element {
  *
  * Renders nothing but a loading card until GET_STATUS answers (so the wizard
  * never flashes for a user who is about to be blocked), then either the block
- * card or `children`. The block card shows WHO this device is bound to, offers a
- * key-backup download, and demands an explicit acknowledgement before letting the
- * user through.
+ * card or `children`. The block card shows WHO this device is bound to, POINTS AT
+ * (but does not perform) the key backup, and demands an explicit acknowledgement
+ * before letting the user through.
+ *
+ * It deliberately does NOT export the key itself: a private-key download offered
+ * mid-flow reads as a required step of the flow and trains users to save private
+ * keys to disk whenever prompted. The export is a self-initiated action in
+ * Settings → Keys instead, mirroring official Passbolt's Keys Inspector.
  *
  * `confirmed` is owned by the PAGE (not the gate) because the page must forward
  * it to SETUP_COMMIT as `allowReplace` — the background refuses to overwrite an
@@ -377,9 +381,6 @@ export function ExistingAccountGate({
   const navigate = useNavigate();
   const [status, setStatus] = useState<StatusResult | null>(null);
   const [ack, setAck] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [exportErr, setExportErr] = useState('');
-  const [exported, setExported] = useState(false);
 
   useEffect(() => {
     if (!active) return;
@@ -400,23 +401,6 @@ export function ExistingAccountGate({
       cancelled = true;
     };
   }, [active]);
-
-  const downloadBackup = async () => {
-    setExportErr('');
-    setExporting(true);
-    try {
-      const kit = await rpc({ type: 'EXPORT_ACCOUNT_KEY' });
-      downloadRecoveryKit(
-        `jpassbolt-${kit.username || 'account'}-recovery-kit.asc`,
-        kit.privateKeyArmored,
-      );
-      setExported(true);
-    } catch (err: unknown) {
-      setExportErr((err instanceof Error && err.message) || t('app.auth.gate.exportFailed'));
-    } finally {
-      setExporting(false);
-    }
-  };
 
   if (!active || confirmed) return <>{children}</>;
   if (!status) return <GateLoading />;
@@ -484,33 +468,21 @@ export function ExistingAccountGate({
             <div>{t('app.auth.gate.warning')}</div>
           </div>
 
+          {/* No key export here by design. A private-key download offered mid-
+              flow is the worst possible moment for it: the user is trying to do
+              something else, so it reads as a required step and trains them to
+              save private keys to disk on prompt. The export lives in Settings →
+              Keys instead (the deliberate, self-initiated place for it, matching
+              official Passbolt's Keys Inspector), and this only points there. */}
           <div className="kit-row">
             <span className="kr-ico">
-              <Download />
+              <KeyRound />
             </span>
             <div className="kr-t">
-              <div className="a">{t('app.auth.gate.kitTitle')}</div>
-              <div className="b">
-                {exported ? t('app.auth.gate.kitSaved') : t('app.auth.gate.kitDesc')}
-              </div>
+              <div className="a">{t('app.auth.gate.backupTitle')}</div>
+              <div className="b">{t('app.auth.gate.backupDesc')}</div>
             </div>
-            <button className="btn sm" disabled={exporting} onClick={() => void downloadBackup()}>
-              {exporting ? (
-                <>
-                  <span className="spin-ring" /> {t('app.auth.gate.downloading')}
-                </>
-              ) : (
-                <>
-                  <Download /> {t('app.auth.gate.download')}
-                </>
-              )}
-            </button>
           </div>
-          {exportErr && (
-            <div className="pf-err" style={{ marginTop: 8 }}>
-              <AlertTriangle size={13} /> {exportErr}
-            </div>
-          )}
 
           <label
             style={{

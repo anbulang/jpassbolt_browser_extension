@@ -1,12 +1,13 @@
 # JPassbolt Browser Extension
 
 An **Aegis-styled**, **Passbolt-compatible** end-to-end-encrypted password manager
-browser extension (MV3). It talks to the JPassbolt backend over the same GpgAuth +
-JWT API as the web frontend, but moves all key material and cryptography into the
-isolated **background service worker** — and adds cross-site **autofill**, which a
-plain web app cannot do.
+browser extension (MV3). It is the canonical JPassbolt client and talks to the
+backend over its GpgAuth + JWT API. All key material and cryptography live in the
+isolated **background service worker** — and the extension adds cross-site
+**autofill**, which a plain web app cannot do. The former standalone SPA in
+`jpassbolt_frontend/` is deprecated and retained only as a historical reference.
 
-## Why an extension (and not just the SPA)
+## Why the extension is the active client
 
 - **Security:** the decrypted private key and all OpenPGP operations live only in
   the background service worker. Web pages never receive the key or passphrase.
@@ -15,7 +16,7 @@ plain web app cannot do.
 - **Autofill:** content scripts can read/fill login forms on any site — impossible
   for a same-origin SPA.
 - **Look & feel:** the UI is built on the JPassbolt **Aegis** design tokens
-  (`src/ui/aegis.css` + `base.css`), so it matches the web frontend instead of the
+  (`src/ui/aegis.css` + `base.css`), inherited from the retired SPA rather than the
   official `passbolt-styleguide`.
 
 ## Architecture
@@ -75,6 +76,6 @@ Load it in Chrome: `chrome://extensions` → enable Developer mode → **Load un
 - `host_permissions` is `<all_urls>` (runtime-configurable server + autofill on any
   site). A hardened build would scope this to the configured server plus per-site
   grants.
-- Read/copy/fill are implemented; create/edit/share/folders are reachable in the
-  web frontend and can be ported into the app page incrementally over the same
-  message protocol.
+- The retired SPA is not a fallback or an active delivery target. Any missing
+  client capability must be implemented in this extension over the typed message
+  protocol.
