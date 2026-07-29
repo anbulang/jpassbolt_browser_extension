@@ -109,8 +109,21 @@ export const en: Dict = {
   'app.settings.keys.publicKey.download': 'Download public key',
   'app.settings.keys.publicKey.unavailable':
     'The public key is unavailable on this device.',
+  // --- Private key backup (recovery kit) ---
+  // This is the ONE place in the product that exports the private key, and it
+  // is deliberately self-initiated: the setup/recovery gate only points here.
+  'app.settings.keys.privateKey.title': 'Recovery kit',
+  'app.settings.keys.privateKey.intro':
+    'Your private key exists only in this browser — the server never holds a copy. If you lose this device without a backup, the data encrypted for this account can never be decrypted again.',
+  'app.settings.keys.privateKey.warning':
+    'The backup file contains your PRIVATE key. It stays protected by your passphrase, so it is not plaintext — but anyone who obtains both the file and your passphrase gains full access to your vault. Store it offline, never in a shared folder or another password manager.',
+  'app.settings.keys.privateKey.export': 'Download recovery kit',
+  'app.settings.keys.privateKey.exporting': 'Exporting…',
+  'app.settings.keys.privateKey.exported':
+    'Recovery kit downloaded — move it somewhere safe and offline.',
+  'app.settings.keys.privateKey.failed': 'Could not export the private key. Please try again.',
   'app.settings.keys.privateKeyNote':
-    'Your private key is never shown or exported here. It stays passphrase-protected in this browser, and the server never holds a copy — back it up with the recovery kit from the setup flow.',
+    'Everything above except the recovery kit is public material. Your private key stays passphrase-protected in this browser and is never sent to the server.',
 
   // --- Passphrase section ---
   'app.settings.passphrase.title': 'Passphrase',
@@ -299,8 +312,19 @@ export const zh: Dict = {
   'app.settings.keys.publicKey.copy': '复制公钥',
   'app.settings.keys.publicKey.download': '下载公钥',
   'app.settings.keys.publicKey.unavailable': '本设备上没有可用的公钥。',
+  // --- 私钥备份（恢复工具包）---
+  // 全产品唯一导出私钥的地方，且刻意设计为用户主动发起；setup/恢复的闸门只做指引。
+  'app.settings.keys.privateKey.title': '恢复工具包',
+  'app.settings.keys.privateKey.intro':
+    '你的私钥只存在于本浏览器，服务器不持有任何副本。若在没有备份的情况下丢失本设备，为该账号加密的数据将永远无法再解密。',
+  'app.settings.keys.privateKey.warning':
+    '备份文件中包含你的私钥。它仍受你的口令保护、并非明文——但同时拿到该文件与你口令的人将获得保险库的完全访问权。请离线保存，切勿放入共享目录或另一个密码管理器。',
+  'app.settings.keys.privateKey.export': '下载恢复工具包',
+  'app.settings.keys.privateKey.exporting': '正在导出…',
+  'app.settings.keys.privateKey.exported': '恢复工具包已下载 —— 请移到离线的安全位置保存。',
+  'app.settings.keys.privateKey.failed': '导出私钥失败，请重试。',
   'app.settings.keys.privateKeyNote':
-    '此处永不显示、永不导出你的私钥。私钥以口令保护的形式留在本浏览器，服务器不持有任何副本 —— 请用注册流程提供的恢复套件做好备份。',
+    '除恢复工具包外，上面展示的都是公开材料。你的私钥以口令保护的形式留在本浏览器，绝不会发送到服务器。',
 
   // --- 口令 ---
   'app.settings.passphrase.title': '口令',

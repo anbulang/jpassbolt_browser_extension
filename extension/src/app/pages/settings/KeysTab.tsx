@@ -2,18 +2,42 @@
  * Keys inspector — the OpenPGP key card lifted out of the retired AccountTab,
  * plus the armored PUBLIC key (view / copy / download).
  *
- * ZERO-KNOWLEDGE: everything here is derived from the account's PUBLIC key. The
- * KEY_INFO RPC reads chrome.storage.local's public-key slot inside the
+ * ZERO-KNOWLEDGE: the inspector cards are derived from the account's PUBLIC key.
+ * The KEY_INFO RPC reads chrome.storage.local's public-key slot inside the
  * background and returns only public material (fingerprint, key id, algorithm,
- * bits, user ids, armored public key). The private key is never requested,
- * never rendered and never exported from this page — the only private-key
- * export in the product is the setup flow's recovery kit, behind its own gate.
+ * bits, user ids, armored public key).
+ *
+ * The recovery-kit card is the exception: EXPORT_ACCOUNT_KEY returns the
+ * still-passphrase-protected armored private key and it goes straight to the
+ * user's disk, never the network.
+ *
+ * There are exactly two private-key exports in the product, and the split is
+ * intentional: SetupPage offers the kit ONCE, at account creation, for the key
+ * it just generated (matching official Passbolt's first-setup step), and this
+ * card is the standing, self-initiated re-download afterwards (matching official
+ * Passbolt's Keys Inspector → Private). ExistingAccountGate deliberately has
+ * NEITHER — a key download offered mid-flow reads as a required step of that
+ * flow and trains users to save private keys whenever prompted, so the gate only
+ * points at this page.
+ *
+ * The private key is never RENDERED here either: it is written to a file
+ * without ever being shown on screen.
  *
  * Copies go through the background COPY RPC (offscreen document): the app
  * iframe cannot rely on navigator.clipboard inside the host page.
  */
 import { useEffect, useState } from 'react';
-import { Check, Copy, Download, Eye, EyeOff, Fingerprint, KeyRound } from 'lucide-react';
+import {
+  AlertTriangle,
+  Check,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  Fingerprint,
+  KeyRound,
+  ShieldAlert,
+} from 'lucide-react';
 import { rpc } from '../../../shared/messages';
 import type { KeyInfo } from '../../../shared/rpc/auth';
 import { t } from '../../../shared/i18n';
@@ -42,6 +66,9 @@ export function KeysTab({ me }: { me: User }) {
   const [fpCopied, setFpCopied] = useState(false);
   const [pubCopied, setPubCopied] = useState(false);
   const [showPub, setShowPub] = useState(false);
+  const [kitBusy, setKitBusy] = useState(false);
+  const [kitDone, setKitDone] = useState(false);
+  const [kitErr, setKitErr] = useState('');
 
   // KEY_INFO gives the account key's derived public info; null while loading or
   // when the background has no key to report.
@@ -92,6 +119,28 @@ export function KeysTab({ me }: { me: User }) {
     if (!publicKeyArmored) return;
     const who = me.username || 'account';
     downloadText(`jpassbolt-${who}-public.asc`, publicKeyArmored, 'application/pgp-keys');
+  };
+
+  // Recovery kit: the armored PRIVATE key, still passphrase-protected, written
+  // straight to disk. Never held in component state — binding it to a variable
+  // that outlives the call would leave private-key material sitting in this
+  // iframe's heap for no benefit.
+  const exportRecoveryKit = async () => {
+    setKitErr('');
+    setKitBusy(true);
+    try {
+      const kit = await rpc({ type: 'EXPORT_ACCOUNT_KEY' });
+      downloadText(
+        `jpassbolt-${kit.username || me.username || 'account'}-recovery-kit.asc`,
+        kit.privateKeyArmored,
+        'application/pgp-keys',
+      );
+      setKitDone(true);
+    } catch (err: unknown) {
+      setKitErr((err instanceof Error && err.message) || t('app.settings.keys.privateKey.failed'));
+    } finally {
+      setKitBusy(false);
+    }
   };
 
   return (
@@ -229,6 +278,48 @@ export function KeysTab({ me }: { me: User }) {
           ) : (
             <div style={{ color: 'var(--text-3)', fontSize: '13.5px' }}>
               {t('app.settings.keys.publicKey.unavailable')}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Recovery kit — the only private-key export in the product */}
+      <div className="scard">
+        <div className="scard-h">
+          <ShieldAlert />
+          <h3>{t('app.settings.keys.privateKey.title')}</h3>
+        </div>
+        <div style={{ padding: '15px 18px' }}>
+          <div className="hint" style={{ marginBottom: 12, lineHeight: 1.5 }}>
+            {t('app.settings.keys.privateKey.intro')}
+          </div>
+
+          <div className="warnbox" style={{ marginBottom: 14 }}>
+            <AlertTriangle />
+            <div>{t('app.settings.keys.privateKey.warning')}</div>
+          </div>
+
+          <button type="button" className="btn sm" disabled={kitBusy} onClick={() => void exportRecoveryKit()}>
+            {kitBusy ? (
+              <>
+                <span className="spin-ring" /> {t('app.settings.keys.privateKey.exporting')}
+              </>
+            ) : (
+              <>
+                <Download size={16} /> {t('app.settings.keys.privateKey.export')}
+              </>
+            )}
+          </button>
+
+          {kitDone && (
+            <div className="jpb-ok" style={{ marginTop: 12 }}>
+              <Check size={16} />
+              <div>{t('app.settings.keys.privateKey.exported')}</div>
+            </div>
+          )}
+          {kitErr && (
+            <div className="pf-err" style={{ marginTop: 10 }}>
+              <AlertTriangle size={13} /> {kitErr}
             </div>
           )}
         </div>

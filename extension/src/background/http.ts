@@ -127,6 +127,42 @@ export async function apiCallRaw(
 const GPGAUTH_NONCE =
   /^gpgauthv1\.3\.0\|36\|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\|gpgauthv1\.3\.0$/;
 
+/**
+ * Known `X-GPGAuth-Debug` messages mapped to LOCAL, translated strings.
+ *
+ * That header is server-controlled free text — a hostile or compromised server
+ * could put anything in it ("Send your private key to…"), so it must never be
+ * rendered verbatim, for the same reason stage 2 refuses to echo back a
+ * malformed challenge. Recognised messages therefore become local strings and
+ * anything unknown collapses to a generic one; the server's own wording is
+ * only ever used to CHOOSE a message, never shown.
+ *
+ * Matching is substring-based because official Passbolt appends a reason to
+ * the same stem ("There is no user associated with this key. User not found." /
+ * "… No key id set."). Order matters: the more specific rule wins.
+ */
+const GPGAUTH_DEBUG_RULES: ReadonlyArray<readonly [RegExp, string]> = [
+  [/no key id set/i, 'bg.gpgAuthMissingKeyId'],
+  [/there is no user associated with this key/i, 'bg.noAccountMatchesKey'],
+  [/invalid fingerprint|server key|secret key/i, 'bg.gpgAuthServerKeyProblem'],
+];
+
+/**
+ * Translate a GpgAuth error response into a local message, or null when the
+ * response carries no error.
+ *
+ * Why this exists at all: the server does NOT signal these failures with a
+ * status code we can key off — official Passbolt answers 400/404/500 while
+ * this project's backend currently answers 200, both with
+ * `X-GPGAuth-Error: true`. Checking the header covers both.
+ */
+function gpgAuthError(res: Response): string | null {
+  if (res.headers.get('x-gpgauth-error') !== 'true') return null;
+  const debug = res.headers.get('x-gpgauth-debug') ?? '';
+  const rule = GPGAUTH_DEBUG_RULES.find(([re]) => re.test(debug));
+  return t(rule ? rule[1] : 'bg.gpgAuthRejected');
+}
+
 export async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: string }> {
   const base = await apiBase();
   const fingerprint = privateKey.getFingerprint();
@@ -144,6 +180,14 @@ export async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: st
     body: JSON.stringify({ data: { gpg_auth: { keyid: fingerprint } } }),
   });
   if (stage1.status === 404) throw new Error(t('bg.noAccountMatchesKey'));
+
+  // Must come BEFORE the token check: an unknown key yields a 200 carrying
+  // `X-GPGAuth-Error: true` and no token, which would otherwise surface as the
+  // misleading `bg.noChallengeToken` ("the server returned no challenge
+  // token") and send people debugging a perfectly healthy server.
+  const stage1Error = gpgAuthError(stage1);
+  if (stage1Error) throw new Error(stage1Error);
+
   const encryptedToken = stage1.headers.get('x-gpgauth-user-auth-token');
   if (!encryptedToken) throw new Error(t('bg.noChallengeToken'));
 
@@ -167,6 +211,11 @@ export async function gpgAuth(privateKey: openpgp.PrivateKey): Promise<{ jwt: st
       data: { gpg_auth: { keyid: fingerprint, user_token_result: nonce } },
     }),
   });
+  // Same reasoning as stage 1: a rejected challenge comes back as an error
+  // header rather than a status code, so check it before blaming the JWT.
+  const stage2Error = gpgAuthError(stage2);
+  if (stage2Error) throw new Error(stage2Error);
+
   const authHeader = stage2.headers.get('authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     throw new Error(t('bg.authFailedNoJwt'));

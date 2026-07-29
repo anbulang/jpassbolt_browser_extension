@@ -14,7 +14,7 @@
  * (useResolvedResources). Reveal/copy of a secret happens in the background —
  * plaintext reaches this iframe only as already-displayable fields.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Plus, Search, Star, Lock, AlertTriangle, Clock, X, ArrowDownUp } from 'lucide-react';
 import type { Resource, ResourceType } from '../../../shared/types';
 import { describeApiError } from '../../lib/errors';
@@ -69,6 +69,16 @@ export default function VaultPage() {
   const { display, resolving } = useResolvedResources(resources);
 
   const [resourceTypes, setResourceTypes] = useState<ResourceType[]>([]);
+
+  /**
+   * Bumped when an operation OUTSIDE the folder tree changes the folder set,
+   * so the tree (which owns its own copy) refetches instead of staying stale
+   * until the next page reload. An import is the visible case: it can create a
+   * whole subtree that refetch() alone would only surface in the membership
+   * map, never in the sidebar.
+   */
+  const [folderReloadKey, setFolderReloadKey] = useState(0);
+  const reloadFolderTree = useCallback(() => setFolderReloadKey((n) => n + 1), []);
 
   // Filters
   const [search, setSearch] = useState('');
@@ -223,6 +233,7 @@ export default function VaultPage() {
         }}
         onResourceMoved={() => void refetch()}
         onFoldersChanged={() => void refetch()}
+        reloadKey={folderReloadKey}
         // Export has to be driven from here: the scope's base id set is
         // `display`, which only exists on this page.
         onExportFolder={(f) => {
@@ -437,7 +448,13 @@ export default function VaultPage() {
           setImportExport(false);
           setExportFolder(null);
         }}
-        onImported={() => void refetch()}
+        // An import creates resources AND (from the folder columns) folders, so
+        // both copies of the folder set have to be refreshed: refetch() for the
+        // membership map here, reloadFolderTree() for the sidebar's own list.
+        onImported={() => {
+          void refetch();
+          reloadFolderTree();
+        }}
       />
 
       {/* Share dialog */}
