@@ -48,6 +48,7 @@ import { startSetup, completeSetup } from '../../services/setup';
 import { describeApiError } from '../../lib/errors';
 import PassphraseInput from '../../components/PassphraseInput';
 import SecurityTokenPicker from '../../components/SecurityTokenPicker';
+import { BrandMark } from '../../../ui/BrandMark';
 import {
   DEFAULT_SECURITY_TOKEN,
   getSecurityToken,
@@ -351,7 +352,7 @@ export default function SetupPage() {
         <div className="flow-top">
           <div className="flow-brand">
             <span className="lg">
-              <Vault />
+              <BrandMark />
             </span>
             <span className="bn">{t('app.auth.brand')}</span>
           </div>

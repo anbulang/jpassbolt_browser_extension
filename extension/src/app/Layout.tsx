@@ -36,6 +36,7 @@ import { api } from './lib/api';
 import { tf } from './lib/i18n';
 import { joinName } from '../shared/names';
 import { Avatar } from './components/Avatar';
+import { BrandMark } from '../ui/BrandMark';
 import { avatarUrl } from './services/profile';
 import { getServerSettings } from './services/settings';
 import type { ApiResponse as ApiBody, User as ApiUser } from '../shared/types';
@@ -227,7 +228,7 @@ export function AppLayout({
     <div className="app">
       <div className="rail">
         <div className="rail-logo" title="JPassbolt">
-          <Vault />
+          <BrandMark />
         </div>
         {NAV_ITEMS.map(({ label, path, icon: Icon, alsoMatch }) => (
           <NavLink
