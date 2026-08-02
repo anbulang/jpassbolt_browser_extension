@@ -2,6 +2,8 @@
 
 在真实浏览器里驱动扩展 UI 的端到端测试。存在的理由很直接：`npm run build`、`npm run typecheck` 和后端的 900+ 单测**都抓不出跨层迁移丢失的运行时行为**——例如 background 手拼 `?contain[x]=1` 被 Tomcat 在 servlet 之前 400 掉的那类 bug（潜伏了两周，只有真发一次 HTTP 才现形）。这套测试就是那道网。
 
+两套脚本：`all.mjs`（UI 行为，`npm run e2e`）与 `mail.mjs`（通知邮件副作用，`npm run e2e:mail`，额外需要 MailHog）。
+
 ## 覆盖范围（四件官方对齐需求 + 一个回归哨兵）
 
 | | 内容 |
@@ -38,6 +40,26 @@ npm run e2e
 可选环境变量：`JPB_E2E_SERVER`（默认 `http://127.0.0.1:8090`）、`JPB_E2E_CHROME`、`JPB_E2E_KEY`。
 
 截图与 `e2e-results.json` 落在 `e2e/artifacts/`（已 gitignore）。退出码非 0 = 有断言失败。
+
+## 通知邮件 E2E（`mail.mjs`）
+
+验证对齐计划 P3.1（文件夹 CUD）/ P3.2（资源 CUD）的通知邮件副作用。后端单测用 mock 的 `MailService` 直接调 redactor，证不了三件事：事务**真的提交**后 `AFTER_COMMIT` 监听器会触发、`@Async` 执行器真会投递、以及真实权限行下的收件人解析。这套补上。
+
+额外前置：**MailHog**（后端 `local` profile 已默认把 `spring.mail` 指向它，且 `jpassbolt.email.enabled=true`）
+
+```bash
+docker run -d --name jpb-mailhog -p 127.0.0.1:1025:1025 -p 127.0.0.1:8025:8025 mailhog/mailhog
+npm run e2e:mail     # 或 node e2e/mail.mjs
+```
+
+环境变量：`JPB_E2E_MAILHOG`（默认 `http://127.0.0.1:8025`）。
+
+断言要点：
+
+- **先证通路存活**再断言"0 封"——否则 SMTP 断了和门控生效长得一模一样。canary 用默认开启的 `send_folder_share`，并实测投递延迟与"0 封"等待窗做倍数比对。
+- 文件夹删除后权限行被**物理删除**，betty 仍收到信，靠的是 `FolderDeletedEvent` 删前快照收件人；资源是**软删**、权限行还在，所以删除者 ada 被排除是 redactor 过滤的功劳。
+- 密文归属**不能**靠"两段密文不相等"判断（OpenPGP 每次加密都随机，同一把钥加两次也不等），因此比对 PKESK 包里的**收件人 key ID** 与各用户公钥。
+- 脚本自己把开关显式置 false 再验抑制、跑完恢复，故可重复跑（开关持久化在 `organization_settings`，不能依赖出厂默认值）。
 
 ## 设计说明
 
