@@ -74,13 +74,29 @@ export function makeReporter() {
     ok: (n, d = '') => { results.push(['PASS', n, d]); console.log(`✅ ${n}${d ? ' — ' + d : ''}`); },
     bad: (n, d = '') => { results.push(['FAIL', n, d]); console.log(`❌ ${n}${d ? ' — ' + d : ''}`); },
     info: (m) => console.log('ℹ️  ' + m),
-    finish(shotDir) {
+    /**
+     * `expected` is the number of assertions a COMPLETE run records. Without it
+     * a run that threw halfway reports "N passed, 0 failed" and exits 0 — the
+     * unrecorded remainder is indistinguishable from a clean pass, so a crash
+     * in the middle reads as green. Pass it and a short run is itself a failure.
+     */
+    finish(shotDir, expected = 0) {
       const pass = results.filter((r) => r[0] === 'PASS').length;
-      const fail = results.filter((r) => r[0] === 'FAIL').length;
+      let fail = results.filter((r) => r[0] === 'FAIL').length;
+      const total = results.length;
       console.log('\n================ 汇总 ================');
       for (const [s, n, d] of results) console.log(`${s === 'PASS' ? '✅' : '❌'} ${n}${d ? ' — ' + d : ''}`);
+      if (expected && total < expected) {
+        console.log(`❌ 断言数不足：只跑了 ${total}/${expected} 项 —— 用例中途中断，其余从未执行`);
+        fail += 1;
+      }
       console.log(`\n${pass} passed, ${fail} failed`);
-      if (shotDir) fs.writeFileSync(path.join(shotDir, 'e2e-results.json'), JSON.stringify({ pass, fail, results }, null, 2));
+      if (shotDir) {
+        fs.writeFileSync(
+          path.join(shotDir, 'e2e-results.json'),
+          JSON.stringify({ pass, fail, total, expected, results }, null, 2),
+        );
+      }
       return fail;
     },
   };
