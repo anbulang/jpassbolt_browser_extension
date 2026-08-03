@@ -97,7 +97,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
  * applies — that is the whole point of the gate-off checks.
  */
 let lastArrivalMs = -1;
-async function settle(expected, graceMs = 6000, timeoutMs = 25000) {
+/**
+ * Grace window for "no MORE mail arrives". Self-calibrating: the canary step
+ * measures real delivery latency and widens this to 4× it. A hardcoded value
+ * is what made this harness flaky — a run where the async mail executor took
+ * 4.3s (vs the usual ~300ms) blew straight through a fixed 6s window, both
+ * thinning the expected-0 margin and letting a late mail from step N land
+ * inside step N+1's assertion.
+ */
+let graceMsDefault = 6000;
+
+async function settle(expected, graceMs = graceMsDefault, timeoutMs = 25000) {
   const started = Date.now();
   const deadline = started + timeoutMs;
   lastArrivalMs = -1;
@@ -110,6 +120,31 @@ async function settle(expected, graceMs = 6000, timeoutMs = 25000) {
   }
   await sleep(graceMs);
   return (await inbox()).map(mailOf);
+}
+
+/**
+ * Empty the inbox, but only once it has stopped growing — a step's own mail
+ * must not still be in flight when the NEXT step starts asserting. Counting
+ * expected mails per step would be brittle (and wrong the moment a gate
+ * changes); waiting for quiet is count-agnostic and directly expresses the
+ * property we need. This replaced fixed sleeps, which silently broke on a run
+ * where delivery took 4.3s instead of the usual ~300ms.
+ */
+async function drainUntilQuiet(quietMs = graceMsDefault, timeoutMs = 45000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = -1;
+  let lastChange = Date.now();
+  while (Date.now() < deadline) {
+    const n = (await inbox()).length;
+    if (n !== last) {
+      last = n;
+      lastChange = Date.now();
+    } else if (Date.now() - lastChange >= quietMs) {
+      break;
+    }
+    await sleep(200);
+  }
+  await purge();
 }
 
 /** Compare the delivered {to, subject} set against the expectation, order-free. */
@@ -134,13 +169,56 @@ const stamp = Date.now();
 /** Assertions a COMPLETE run records — see the catch/finally below. */
 const EXPECTED_ASSERTIONS = 18;
 let crashed = null;
+// Hoisted so the finally-block cleanup can still reach them after a mid-run
+// throw: leaving the notification switches on would contaminate the next run,
+// which is exactly the repeatability this harness advertises.
+let rpc = null;
+let gateResourceId = null;
+
+const unwrap = (r) => r?.body ?? r;
+
+/**
+ * Did an RPC fail? `rpcFrom` never throws, and the failure arrives in one of
+ * TWO shapes depending on which HTTP helper the handler used (see
+ * background/http.ts):
+ *
+ *  - handlers built on `apiCall()` THROW on non-2xx, so background/index.ts
+ *    answers `{ok:false, error}` — RESOURCE_SAVE, SHARE_APPLY, …
+ *  - the `API_CALL` RPC uses `apiCallRaw()`, which RETURNS a non-2xx envelope
+ *    verbatim so the UI can read header.message itself — it arrives as
+ *    `{status, header:{status:'error'}, body}` with no `ok` field at all.
+ *
+ * Checking only the first shape (the obvious one) silently lets every failed
+ * API_CALL through, which is the exact hole these guards exist to close.
+ */
+function rpcFailed(res) {
+  if (!res || typeof res !== 'object') return false;
+  if (res.ok === false) return true;
+  if (res.header && res.header.status === 'error') return true;
+  return typeof res.status === 'number' && res.status >= 400;
+}
+
+const rpcError = (res) =>
+  res?.error ?? res?.header?.message ?? JSON.stringify(res).slice(0, 160);
+
+/**
+ * A mutation whose failure must NOT be silent: several assertions here accept
+ * an EMPTY INBOX as proof, and a mutation that never happened delivers zero
+ * mail just as convincingly as a gate that works.
+ */
+async function must(msg) {
+  const res = await rpc(msg);
+  if (rpcFailed(res)) {
+    throw new Error(`${msg.type} ${msg.path ?? ''} 失败: ${rpcError(res)}`);
+  }
+  return unwrap(res);
+}
 
 try {
   const drv = await ctx.newPage();
   await drv.goto(`chrome-extension://${extId}/options.html`);
   await drv.waitForLoadState('networkidle');
-  const rpc = rpcFrom(drv);
-  const unwrap = (r) => r?.body ?? r;
+  rpc = rpcFrom(drv);
 
   const st = await provisionAda(drv);
   if (st?.phase !== 'unlocked') {
@@ -181,14 +259,15 @@ try {
   // Calibrate the "0 mails" grace window against MEASURED latency: an expected-0
   // assertion is only meaningful if we waited comfortably longer than a real
   // mail actually takes. 6s grace vs a typical sub-second async delivery.
-  const GRACE_MS = 6000;
-  if (lastArrivalMs >= 0 && lastArrivalMs * 4 < GRACE_MS) {
-    R.ok('「0 封」等待窗足够宽', `实测投递 ${lastArrivalMs}ms，等待 ${GRACE_MS}ms（>4x）`);
+  if (lastArrivalMs < 0) {
+    R.bad('无法测得投递延迟，「0 封」断言的余量无从判断');
   } else {
-    R.bad('「0 封」等待窗可能不够宽 —— 门控断言存在假绿风险', `实测投递 ${lastArrivalMs}ms，等待仅 ${GRACE_MS}ms`);
+    graceMsDefault = Math.max(6000, lastArrivalMs * 4);
+    R.ok('「0 封」等待窗已按实测延迟自校准',
+      `实测投递 ${lastArrivalMs}ms → 等待 ${graceMsDefault}ms（≥4x）`);
   }
   await rpc({ type: 'API_CALL', method: 'DELETE', path: `/folders/${canaryFolder.id}.json` });
-  await sleep(2500);
+  await drainUntilQuiet();
 
   // ── 1. a CLOSED master gate really suppresses (pipeline now proven live) ─
   // Set the two gates to false EXPLICITLY rather than relying on the shipped
@@ -201,29 +280,45 @@ try {
     path: '/settings/emails/notifications.json',
     body: { send_password_create: false, send_folder_create: false },
   });
+  // Both gate-off checks accept an EMPTY inbox as proof. That is only evidence
+  // of a working gate if the triggering mutation actually happened — a folder
+  // create that 500s also delivers zero mail. So each one must fail loudly
+  // (`must`) and hand back a real id before its assertion is allowed to count.
   await purge();
-  const gateFolder = unwrap(
-    await rpc({ type: 'API_CALL', method: 'POST', path: '/folders.json', body: { name: `gate-off-${stamp}` } }),
-  );
-  assertMails('P3.1 send_folder_create 关闭 → 不发信', await settle(0), []);
+  const gateFolder = await must({
+    type: 'API_CALL', method: 'POST', path: '/folders.json', body: { name: `gate-off-${stamp}` },
+  });
+  if (!gateFolder?.id) {
+    R.bad('P3.1 门控前置不成立：文件夹没建成，"0 封"不能作为门控生效的证据',
+      JSON.stringify(gateFolder).slice(0, 200));
+  } else {
+    assertMails('P3.1 send_folder_create 关闭 → 不发信', await settle(0), []);
+  }
 
   await purge();
-  const gateRes = unwrap(
-    await rpc({
-      type: 'RESOURCE_SAVE',
-      mode: 'create',
-      input: {
-        name: `gate-off-res-${stamp}`,
-        username: 'nobody',
-        uri: 'https://gate.example.com',
-        resourceTypeSlug: 'password-and-description',
-        secret: { password: 'gate-off-pw', description: '' },
-      },
-    }),
-  );
-  assertMails('P3.2 send_password_create 关闭 → 不发信', await settle(0), []);
-  await rpc({ type: 'API_CALL', method: 'DELETE', path: `/folders/${gateFolder.id}.json` });
-  await sleep(2500);
+  const gateRes = await must({
+    type: 'RESOURCE_SAVE',
+    mode: 'create',
+    input: {
+      name: `gate-off-res-${stamp}`,
+      username: 'nobody',
+      uri: 'https://gate.example.com',
+      resourceTypeSlug: 'password-and-description',
+      secret: { password: 'gate-off-pw', description: '' },
+    },
+  });
+  gateResourceId = (gateRes?.resource ?? gateRes)?.id ?? gateRes?.id ?? null;
+  if (!gateResourceId) {
+    R.bad('P3.2 门控前置不成立：密码没建成，"0 封"不能作为门控生效的证据',
+      JSON.stringify(gateRes).slice(0, 200));
+  } else {
+    assertMails('P3.2 send_password_create 关闭 → 不发信', await settle(0), []);
+  }
+
+  if (gateFolder?.id) {
+    await rpc({ type: 'API_CALL', method: 'DELETE', path: `/folders/${gateFolder.id}.json` });
+  }
+  await drainUntilQuiet();
 
   // ── 2. flip the two default-OFF gates on + reveal secrets ───────────────
   // show_secret is what makes the per-recipient isolation check possible.
@@ -439,7 +534,7 @@ try {
         permissions: [{ aro: 'User', aro_foreign_key: betty.id, type: 7, is_new: true }],
       });
     }
-    await sleep(3000);
+    await drainUntilQuiet();
 
     // Anti-vacuity guard: if the children were never created (or never landed
     // in the folder) the cascade would sweep nothing and the "no extra mail"
@@ -483,22 +578,26 @@ try {
     const dFolder = unwrap(
       await rpc({ type: 'API_CALL', method: 'POST', path: '/folders.json', body: { name: dName } }),
     );
-    await sleep(2500);
-    await purge();
-    let shared = true;
-    try {
-      await rpc({
-        type: 'SHARE_APPLY',
-        foreignModel: 'folder',
-        foreignId: dFolder.id,
-        permissions: [
-          { aro: 'User', aro_foreign_key: betty.id, type: 1, is_new: true },
-          { aro: 'User', aro_foreign_key: edith.id, type: 1, is_new: true },
-        ],
-      });
-    } catch (err) {
-      shared = false;
-      R.info(`共享给 disabled 用户被后端拒绝（本身也合理）: ${String(err).slice(0, 120)}`);
+    await drainUntilQuiet();
+    // A try/catch would be dead code here: rpcFrom answers a background failure
+    // as {ok:false,error} instead of throwing (lib.mjs), so a rejected share
+    // would leave us waiting for mail from a grant that never happened and
+    // report a spurious failure. Inspect the result instead.
+    const shareRes = await rpc({
+      type: 'SHARE_APPLY',
+      foreignModel: 'folder',
+      foreignId: dFolder.id,
+      permissions: [
+        { aro: 'User', aro_foreign_key: betty.id, type: 1, is_new: true },
+        { aro: 'User', aro_foreign_key: edith.id, type: 1, is_new: true },
+      ],
+    });
+    const shared = !rpcFailed(shareRes);
+    if (!shared) {
+      // SHARE_APPLY is all-or-nothing, so betty was not granted either — there
+      // is nothing to assert. Refusing to share with a suspended account is
+      // itself defensible behaviour, so this is reported, not failed.
+      R.info(`共享给 disabled 用户被后端整体拒绝，本项无从断言: ${String(rpcError(shareRes)).slice(0, 140)}`);
     }
     if (shared) {
       assertMails('停用用户不收信（edith 已 disabled，只有 betty 收到）', await settle(1), [
@@ -509,18 +608,6 @@ try {
     await sleep(2000);
   }
 
-  // cleanup: drop the gate-off resource and put the toggles back where we
-  // found them, so a repeat run starts from the same state as this one.
-  if (gateRes) {
-    const gid = (gateRes?.resource ?? gateRes)?.id ?? gateRes?.id;
-    if (gid) await rpc({ type: 'API_CALL', method: 'DELETE', path: `/resources/${gid}.json` }).catch(() => {});
-  }
-  await rpc({
-    type: 'API_CALL',
-    method: 'POST',
-    path: '/settings/emails/notifications.json',
-    body: { send_password_create: false, send_folder_create: false, show_secret: false },
-  }).catch(() => {});
 } catch (err) {
   // Without this, a throw anywhere above (a transient 5xx, the vault re-locking,
   // RESOURCE_SAVE returning {ok:false} so `resourceId` is undefined) would land
@@ -530,6 +617,23 @@ try {
   crashed = err;
   R.bad('运行中断，后续断言未执行', String(err?.stack ?? err).slice(0, 500));
 } finally {
+  // Cleanup MUST live here, not at the end of the try. The notification
+  // switches persist in organization_settings, so a throw after they were
+  // enabled would leave them on and silently change the next run's behaviour —
+  // breaking the repeatability this harness promises. Best-effort throughout:
+  // a cleanup failure must never mask the real result.
+  if (rpc) {
+    if (gateResourceId) {
+      await rpc({ type: 'API_CALL', method: 'DELETE', path: `/resources/${gateResourceId}.json` })
+        .catch(() => {});
+    }
+    await rpc({
+      type: 'API_CALL',
+      method: 'POST',
+      path: '/settings/emails/notifications.json',
+      body: { send_password_create: false, send_folder_create: false, show_secret: false },
+    }).catch((e) => console.error('通知开关恢复失败，下次跑之前请手工复位:', e));
+  }
   const fail = R.finish(SHOT, EXPECTED_ASSERTIONS);
   await ctx.close().catch(() => {});
   if (crashed) console.error(crashed);
