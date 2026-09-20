@@ -54,6 +54,10 @@ const STYLE = `
   box-shadow: 0 12px 32px rgba(0,0,0,.2); padding: 14px; }
 .banner .t { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 13.5px; margin-bottom: 4px; }
 .banner .logo { width: 22px; height: 22px; border-radius: 6px; display: block; }
+.cta > .brand-fallback, .banner .brand-fallback {
+  display: grid; place-items: center; border-radius: 6px;
+  background: #4263eb; color: #fff; font-size: 10px; font-weight: 700;
+}
 .banner .d { font-size: 12.5px; color: #6b7280; line-height: 1.45; margin-bottom: 12px; word-break: break-all; }
 .banner .err { font-size: 12px; color: #c92a2a; line-height: 1.4; margin: -4px 0 10px; }
 .banner .btns { display: flex; gap: 8px; }
@@ -73,9 +77,15 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
 
 function brandImage(cls: string): HTMLImageElement {
   const image = el('img', cls);
-  image.src = brandIconUrl;
+  // Vite emits /assets/...; a page-injected img otherwise resolves it against
+  // the login site's origin, even inside our closed shadow root.
+  image.src = chrome.runtime.getURL(brandIconUrl.replace(/^\//, ''));
   image.alt = '';
   image.draggable = false;
+  image.addEventListener('error', () => {
+    // Host CSP or a missing resource must not hide the autofill entry point.
+    image.replaceWith(el('span', `${cls} brand-fallback`, 'JP'));
+  }, { once: true });
   return image;
 }
 

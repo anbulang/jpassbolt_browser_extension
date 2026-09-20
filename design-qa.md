@@ -48,7 +48,10 @@ reported no console warnings or errors.
 
 ## Findings
 
-No actionable P0, P1, or P2 differences remain.
+Visual comparison passed. Runtime autofill checks are separately covered by
+`npm run e2e:brand`: extension-origin image loading, restrictive host CSP, and
+a visible JP fallback when image loading fails. The original visual-only
+preview did not catch the content-script URL regression.
 
 ## Comparison History
 
