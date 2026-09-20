@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "zip": "cd dist && zip -r -FS ../jpassbolt-extension.zip . && cd ..",
     "e2e": "node e2e/all.mjs",
-    "e2e:brand": "node e2e/brand.mjs"
+    "e2e:brand": "node e2e/brand.mjs",
+    "e2e:mail": "node e2e/mail.mjs"
   },
   "dependencies": {
     "hash-wasm": "^4.12.0",
