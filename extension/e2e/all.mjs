@@ -28,6 +28,7 @@ const R = makeReporter();
 const { ctx, extId } = await launch(SHOT);
 const { calls, bad400 } = trackApi(ctx);
 const url = (p) => `chrome-extension://${extId}/${p}`;
+let crashed = null;
 
 try {
   // ── provision ada via RPC ────────────────────────────────────────────────
@@ -315,8 +316,17 @@ try {
       R.bad('⑤ 密钥不匹配的文案既非预期新文案也非旧误报', msg.slice(0, 120));
     }
   }
+} catch (err) {
+  // process.exit() in `finally` pre-empts a propagating exception, so without
+  // this catch a crash halfway through printed "N passed, 0 failed" and exited
+  // 0 — the untested remainder was indistinguishable from a clean pass. (No
+  // expected-count pin here: this suite's assertion total legitimately varies
+  // with the seed data, unlike mail.mjs.)
+  crashed = err;
+  R.bad('运行中断，后续断言未执行', String(err?.stack ?? err).slice(0, 500));
 } finally {
   const fail = R.finish(SHOT);
-  await ctx.close();
-  process.exit(fail ? 1 : 0);
+  await ctx.close().catch(() => {});
+  if (crashed) console.error(crashed);
+  process.exit(fail || crashed ? 1 : 0);
 }
