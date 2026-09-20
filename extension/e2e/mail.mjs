@@ -174,6 +174,7 @@ let crashed = null;
 // which is exactly the repeatability this harness advertises.
 let rpc = null;
 let gateResourceId = null;
+let originalSettings = null;
 
 const unwrap = (r) => r?.body ?? r;
 
@@ -192,14 +193,14 @@ const unwrap = (r) => r?.body ?? r;
  * API_CALL through, which is the exact hole these guards exist to close.
  */
 function rpcFailed(res) {
-  if (!res || typeof res !== 'object') return false;
+  if (!res || typeof res !== 'object') return true;
   if (res.ok === false) return true;
   if (res.header && res.header.status === 'error') return true;
   return typeof res.status === 'number' && res.status >= 400;
 }
 
 const rpcError = (res) =>
-  res?.error ?? res?.header?.message ?? JSON.stringify(res).slice(0, 160);
+  res?.error ?? res?.header?.message ?? String(JSON.stringify(res)).slice(0, 160);
 
 /**
  * A mutation whose failure must NOT be silent: several assertions here accept
@@ -236,9 +237,25 @@ try {
   const ADA = 'ada@passbolt.com';
   const BETTY = 'betty@passbolt.com';
 
+  // Persisted settings need not equal factory defaults. Snapshot exactly the
+  // gates this suite changes, then restore their original values in finally.
+  const effective = await must({ type: 'API_CALL', method: 'GET', path: '/settings/emails/notifications.json' });
+  const testSettings = {
+    send_folder_create: false, send_password_create: false, show_secret: false,
+    send_folder_share: true, send_folder_update: true, send_folder_delete: true,
+    send_password_share: true, send_password_update: true, send_password_delete: true,
+  };
+  const snapshot = {};
+  for (const key of Object.keys(testSettings)) {
+    if (typeof effective?.[key] !== 'boolean') throw new Error(`通知设置缺少布尔键: ${key}`);
+    snapshot[key] = effective[key];
+  }
+  originalSettings = snapshot;
+  await must({ type: 'API_CALL', method: 'POST', path: '/settings/emails/notifications.json', body: testSettings });
+
   // ── 0. prove the pipeline is ALIVE before trusting any "0 mails" result ──
   // A gate-off assertion is worthless if SMTP is simply broken: both look like
-  // an empty inbox. send_folder_share defaults ON, so this is the canary.
+  // an empty inbox. send_folder_share was explicitly enabled above.
   await purge();
   const canaryFolder = unwrap(
     await rpc({ type: 'API_CALL', method: 'POST', path: '/folders.json', body: { name: `canary-${stamp}` } }),
@@ -251,7 +268,7 @@ try {
   });
   const canary = await settle(1);
   const alive = canary.some((m) => m.to === BETTY && /与您共享了文件夹/.test(m.subject));
-  if (alive) R.ok('SMTP 通路存活（默认开启的 folder.share 已投递）', canary.map((m) => m.subject).join(' / '));
+  if (alive) R.ok('SMTP 通路存活（显式开启的 folder.share 已投递）', canary.map((m) => m.subject).join(' / '));
   else {
     R.bad('SMTP 通路不通 —— 后续所有「0 封」断言都不可信', JSON.stringify(canary).slice(0, 300));
     throw new Error('mail pipeline dead');
@@ -274,7 +291,7 @@ try {
   // default: the settings row persists in organization_settings, so a second
   // run against the same database would otherwise start with them already on.
   // ("the shipped default is false" is asserted by the backend contract test.)
-  await rpc({
+  await must({
     type: 'API_CALL',
     method: 'POST',
     path: '/settings/emails/notifications.json',
@@ -468,19 +485,18 @@ try {
     if (!adaIds || !bettyIds) {
       R.bad('P3.2 取不到用户公钥，无法判定密文归属', `ada=${!!adaIds} betty=${!!bettyIds}`);
     } else {
-      const bettyOk = bettyTo.some((id) => bettyIds.has(id));
-      const bettyLeaksToAda = bettyTo.some((id) => adaIds.has(id));
-      const adaOk = adaTo.some((id) => adaIds.has(id));
-      if (bettyOk && adaOk && !bettyLeaksToAda) {
+      const bettyOk = bettyTo.length > 0 && bettyTo.every((id) => bettyIds.has(id));
+      const adaOk = adaTo.length > 0 && adaTo.every((id) => adaIds.has(id));
+      if (bettyOk && adaOk) {
         R.ok(
-          'P3.2 密文按收件人各自公钥加密（PKESK key id 对得上，且 betty 那封不含 ada 的 key id）',
+          'P3.2 密文仅按收件人自己的公钥加密（两封邮件均无额外 PKESK 收件人）',
           `ada→${adaTo.join(',')} betty→${bettyTo.join(',')}`,
         );
       } else {
         R.bad(
           'P3.2 严重：邮件密文的收件人密钥不对',
           `betty 密文收件人=${bettyTo.join(',')}（应含 betty 的 ${[...bettyIds].join(',')}），` +
-            `ada 密文收件人=${adaTo.join(',')}；bettyOk=${bettyOk} adaOk=${adaOk} 泄给ada=${bettyLeaksToAda}`,
+            `ada 密文收件人=${adaTo.join(',')}；bettyOk=${bettyOk} adaOk=${adaOk}`,
         );
       }
     }
@@ -572,7 +588,7 @@ try {
 
   // ── 6. disabled users are dropped by RecipientResolver ───────────────────
   if (!edith) {
-    R.info('跳过 disabled 收件人检查：种子里没有 edith@passbolt.com');
+    R.skip('disabled 收件人检查', '种子里没有 edith@passbolt.com');
   } else {
     const dName = `D-${stamp}`;
     const dFolder = unwrap(
@@ -597,7 +613,7 @@ try {
       // SHARE_APPLY is all-or-nothing, so betty was not granted either — there
       // is nothing to assert. Refusing to share with a suspended account is
       // itself defensible behaviour, so this is reported, not failed.
-      R.info(`共享给 disabled 用户被后端整体拒绝，本项无从断言: ${String(rpcError(shareRes)).slice(0, 140)}`);
+      R.skip('disabled 收件人检查', `共享被后端整体拒绝，本项无从断言: ${String(rpcError(shareRes)).slice(0, 140)}`);
     }
     if (shared) {
       assertMails('停用用户不收信（edith 已 disabled，只有 betty 收到）', await settle(1), [
@@ -627,12 +643,19 @@ try {
       await rpc({ type: 'API_CALL', method: 'DELETE', path: `/resources/${gateResourceId}.json` })
         .catch(() => {});
     }
-    await rpc({
-      type: 'API_CALL',
-      method: 'POST',
-      path: '/settings/emails/notifications.json',
-      body: { send_password_create: false, send_folder_create: false, show_secret: false },
-    }).catch((e) => console.error('通知开关恢复失败，下次跑之前请手工复位:', e));
+    if (originalSettings) {
+      try {
+        const restored = await must({
+          type: 'API_CALL', method: 'POST', path: '/settings/emails/notifications.json',
+          body: originalSettings,
+        });
+        if (Object.entries(originalSettings).some(([key, value]) => restored?.[key] !== value)) {
+          throw new Error('返回的通知设置与运行前快照不一致');
+        }
+      } catch (err) {
+        R.bad('通知开关恢复失败，下次运行前需复位', String(err));
+      }
+    }
   }
   const fail = R.finish(SHOT, EXPECTED_ASSERTIONS);
   await ctx.close().catch(() => {});

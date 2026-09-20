@@ -73,6 +73,7 @@ export function makeReporter() {
   return {
     ok: (n, d = '') => { results.push(['PASS', n, d]); console.log(`✅ ${n}${d ? ' — ' + d : ''}`); },
     bad: (n, d = '') => { results.push(['FAIL', n, d]); console.log(`❌ ${n}${d ? ' — ' + d : ''}`); },
+    skip: (n, d = '') => { results.push(['SKIP', n, d]); console.log(`⏭ ${n}${d ? ' — ' + d : ''}`); },
     info: (m) => console.log('ℹ️  ' + m),
     /**
      * `expected` is the number of assertions a COMPLETE run records. Without it
@@ -82,19 +83,20 @@ export function makeReporter() {
      */
     finish(shotDir, expected = 0) {
       const pass = results.filter((r) => r[0] === 'PASS').length;
+      const skip = results.filter((r) => r[0] === 'SKIP').length;
       let fail = results.filter((r) => r[0] === 'FAIL').length;
       const total = results.length;
       console.log('\n================ 汇总 ================');
-      for (const [s, n, d] of results) console.log(`${s === 'PASS' ? '✅' : '❌'} ${n}${d ? ' — ' + d : ''}`);
+      for (const [s, n, d] of results) console.log(`${s === 'PASS' ? '✅' : s === 'SKIP' ? '⏭' : '❌'} ${n}${d ? ' — ' + d : ''}`);
       if (expected && total < expected) {
         console.log(`❌ 断言数不足：只跑了 ${total}/${expected} 项 —— 用例中途中断，其余从未执行`);
         fail += 1;
       }
-      console.log(`\n${pass} passed, ${fail} failed`);
+      console.log(`\n${pass} passed, ${fail} failed, ${skip} skipped`);
       if (shotDir) {
         fs.writeFileSync(
           path.join(shotDir, 'e2e-results.json'),
-          JSON.stringify({ pass, fail, total, expected, results }, null, 2),
+          JSON.stringify({ pass, fail, skip, total, expected, results }, null, 2),
         );
       }
       return fail;
