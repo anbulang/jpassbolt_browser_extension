@@ -12,14 +12,13 @@
 .jpb-app { min-height: 100vh; }
 .jpb-shell { display: flex; flex-direction: column; min-height: inherit; }
 
-/* header — brand uses the accent badge like aegis .flow-brand .lg */
+/* header — brand uses the canonical JPassbolt mark */
 .jpb-header {
   display: flex; align-items: center; gap: 10px;
   padding: 14px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
 .jpb-logo {
-  width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center;
-  background: var(--accent); color: #fff; font-weight: 700; font-size: 13px;
+  width: 30px; height: 30px; border-radius: 8px; display: block;
 }
 .jpb-title { font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
 .jpb-sub { font-size: 12px; color: var(--text-3); }

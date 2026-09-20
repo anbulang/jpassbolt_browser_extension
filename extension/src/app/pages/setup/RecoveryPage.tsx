@@ -49,6 +49,7 @@ import { requestRecovery, startRecovery, completeRecovery } from '../../services
 import { describeApiError } from '../../lib/errors';
 import PassphraseInput from '../../components/PassphraseInput';
 import SecurityTokenPicker from '../../components/SecurityTokenPicker';
+import { BrandMark } from '../../../ui/BrandMark';
 import {
   DEFAULT_SECURITY_TOKEN,
   getSecurityToken,
@@ -299,7 +300,7 @@ export default function RecoveryPage() {
         <div className="flow-top">
           <div className="flow-brand">
             <span className="lg">
-              <KeyRound />
+              <BrandMark />
             </span>
             <span className="bn">{t('app.auth.recovery.brand')}</span>
             <button

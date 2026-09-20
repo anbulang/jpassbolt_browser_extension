@@ -31,6 +31,7 @@ import { t } from '../../../shared/i18n';
 import { joinName } from '../../../shared/names';
 import type { User } from '../../../shared/types';
 import { setSecurityToken, type SecurityToken } from '../../../shared/securityToken';
+import { BrandMark } from '../../../ui/BrandMark';
 
 // ---------------------------------------------------------------------------
 // Security token persistence (setup / recovery)
@@ -415,7 +416,7 @@ export function ExistingAccountGate({
         <div className="flow-top">
           <div className="flow-brand">
             <span className="lg">
-              <ShieldAlert />
+              <BrandMark />
             </span>
             <span className="bn">{t('app.auth.brand')}</span>
           </div>

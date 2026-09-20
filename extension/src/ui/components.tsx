@@ -18,6 +18,7 @@ import {
 } from '../shared/passgen';
 import MfaChallenge from '../app/components/MfaChallenge';
 import PassphraseInput from '../app/components/PassphraseInput';
+import { BrandMark } from './BrandMark';
 
 // ---- primitives -----------------------------------------------------------
 export function Btn(props: {
@@ -164,9 +165,7 @@ function FlowFrame({ surface, children }: { surface: FlowSurface; children: Reac
       <div className="flow-card">
         <div className="flow-top">
           <div className="flow-brand">
-            {/* Bare tag: aegis sizes brand icons via `.flow-brand .lg svg`, so an
-                explicit size= (the jpb-* convention) would break alignment. */}
-            <span className="lg"><ShieldCheck /></span>
+            <span className="lg"><BrandMark /></span>
             <span className="bn">{t('app.auth.brand')}</span>
           </div>
         </div>
@@ -354,7 +353,7 @@ export function Header({ account, onLock, onSignOut, right }: {
 }) {
   return (
     <header className="jpb-header">
-      <div className="jpb-logo">JP</div>
+      <BrandMark className="jpb-logo" />
       <div>
         <div className="jpb-title">JPassbolt</div>
         {account ? <div className="jpb-sub">{account.username}</div> : null}
